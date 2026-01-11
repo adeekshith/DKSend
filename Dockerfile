@@ -20,14 +20,14 @@ RUN cargo build --release --target "$(cat /tmp/target)"
 
 COPY . .
 RUN cargo build --release --target "$(cat /tmp/target)" \
-    && cp "/app/target/$(cat /tmp/target)/release/eksend" /eksend \
+    && cp "/app/target/$(cat /tmp/target)/release/dksend" /dksend \
     && mkdir -p /data
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /eksend /eksend
+COPY --from=builder /dksend /dksend
 COPY --from=builder /data /data
 
 ENV DATA_DIR=/data
 EXPOSE 3000
-ENTRYPOINT ["/eksend"]
+ENTRYPOINT ["/dksend"]

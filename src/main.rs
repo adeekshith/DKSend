@@ -36,6 +36,8 @@ struct AppConfig {
     code_min_len: usize,
     code_max_len: usize,
     code_retries: usize,
+    brand_title: String,
+    brand_description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,7 +84,7 @@ struct UploadRecord {
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
-        eprintln!("EkSend error: {err}");
+        eprintln!("DKSend error: {err}");
         std::process::exit(1);
     }
 }
@@ -103,6 +105,7 @@ async fn run() -> Result<(), anyhow::Error> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
+    let brand_title = config.brand_title.clone();
     let state = AppState { pool, config };
 
     let app = Router::new()
@@ -120,7 +123,7 @@ async fn run() -> Result<(), anyhow::Error> {
 
     let listen_addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    println!("EkSend listening on http://{listen_addr}");
+    println!("{} listening on http://{listen_addr}", brand_title);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -129,7 +132,9 @@ async fn run() -> Result<(), anyhow::Error> {
 }
 
 async fn shutdown_signal() {
-    let _ = signal::ctrl_c().await;
+    if signal::ctrl_c().await.is_err() {
+        futures_util::future::pending::<()>().await;
+    }
 }
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
@@ -156,6 +161,10 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         default_expiry = max_expiry;
     }
 
+    let brand_title = env::var("BRAND_TITLE").unwrap_or_else(|_| "DKSend".to_string());
+    let brand_description = env::var("BRAND_DESCRIPTION")
+        .unwrap_or_else(|_| "Drop a file, get a link. No accounts, no fuss.".to_string());
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -165,6 +174,8 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         code_min_len: 3,
         code_max_len: 8,
         code_retries: 5,
+        brand_title,
+        brand_description,
     })
 }
 
@@ -321,8 +332,8 @@ async fn upload_handler(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
-async fn upload_page() -> Html<String> {
-    Html(render_upload_page())
+async fn upload_page(State(state): State<AppState>) -> Html<String> {
+    Html(render_upload_page(&state.config))
 }
 
 async fn download_page_code(
@@ -349,17 +360,28 @@ async fn download_page(
 ) -> Response {
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
-        Ok(None) => return html_error(StatusCode::NOT_FOUND, "This file does not exist."),
+        Ok(None) => {
+            return html_error(
+                StatusCode::NOT_FOUND,
+                "This file does not exist.",
+                &state.config,
+            )
+        }
         Err(_) => {
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
+                &state.config,
             )
         }
     };
 
     if record.expires_at <= Utc::now() {
-        return html_error(StatusCode::GONE, "This file does not exist or is no longer available.");
+        return html_error(
+            StatusCode::GONE,
+            "This file does not exist or is no longer available.",
+            &state.config,
+        );
     }
 
     let canonical_filename = record.original_filename.clone();
@@ -371,7 +393,7 @@ async fn download_page(
         return Redirect::temporary(&canonical_url).into_response();
     }
 
-    Html(render_download_page(&record, &base_url)).into_response()
+    Html(render_download_page(&record, &base_url, &state.config)).into_response()
 }
 
 async fn raw_download_code(
@@ -498,10 +520,13 @@ fn plain_error(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
 }
 
-fn html_error(status: StatusCode, message: &str) -> Response {
+fn html_error(status: StatusCode, message: &str, config: &AppConfig) -> Response {
+    let title = escape_html(&config.brand_title);
     let page = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>EkSend</title><style>{}</style></head><body><main class=\"card\"><h1>EkSend</h1><p>{}</p><a href=\"/\">Upload a file</a></main></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title><style>{}</style></head><body><main class=\"card\"><h1>{}</h1><p>{}</p><a href=\"/\">Upload a file</a></main></body></html>",
+        title,
         base_css(),
+        title,
         escape_html(message)
     );
     (status, Html(page)).into_response()
@@ -648,15 +673,22 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn render_upload_page() -> String {
+fn render_upload_page(config: &AppConfig) -> String {
+    let title = escape_html(&config.brand_title);
+    let description = escape_html(&config.brand_description);
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>EkSend</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>EkSend</h1><p>Drop a file, get a link. No accounts, no fuss.</p></header><section class=\"card\"><form id=\"upload-form\"><label class=\"drop\"><input type=\"file\" id=\"file\" required><span>Drag &amp; drop or click to choose a file</span></label><div class=\"row\"><label>Filename override<input type=\"text\" id=\"filename\" placeholder=\"Leave blank to keep original\"></label><label>Expiry<select id=\"expiry\"><option value=\"\">24h (default)</option><option value=\"30m\">30m</option><option value=\"1h\">1h</option><option value=\"1d\">1d</option><option value=\"7d\">7d</option></select></label></div><button type=\"submit\">Upload</button></form><div id=\"result\" class=\"result hidden\"></div></section><section class=\"notes\"><div><h2>CLI quickstart</h2><pre>curl --upload-file ./hello.txt https://eksend.com</pre></div><div><h2>Raw downloads</h2><p>Use the raw link in scripts or curl.</p></div></section></main><script>{}</script></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>{}</h1><p>{}</p></header><section class=\"card\"><form id=\"upload-form\"><label class=\"drop\"><input type=\"file\" id=\"file\" required><span>Drag &amp; drop or click to choose a file</span></label><div class=\"row\"><label>Filename override<input type=\"text\" id=\"filename\" placeholder=\"Leave blank to keep original\"></label><label>Expiry<select id=\"expiry\"><option value=\"\">24h (default)</option><option value=\"30m\">30m</option><option value=\"1h\">1h</option><option value=\"1d\">1d</option><option value=\"7d\">7d</option></select></label></div><button type=\"submit\">Upload</button></form><div id=\"result\" class=\"result hidden\"></div></section><section class=\"notes\"><div><h2>CLI quickstart</h2><pre>curl --upload-file ./hello.txt https://dksend.com</pre></div><div><h2>Raw downloads</h2><p>Use the raw link in scripts or curl.</p></div></section></main><script>{}</script></body></html>",
+        title,
         base_css(),
+        title,
+        description,
         upload_js()
     )
 }
 
-fn render_download_page(record: &UploadRecord, base_url: &str) -> String {
+fn render_download_page(record: &UploadRecord, base_url: &str, config: &AppConfig) -> String {
+    let title = escape_html(&config.brand_title);
+    let description = escape_html(&config.brand_description);
     let filename = escape_html(&record.original_filename);
     let encoded = urlencoding::encode(&record.original_filename);
     let download_url = format!("{base_url}/raw/{}/{}", record.code, encoded);
@@ -666,8 +698,11 @@ fn render_download_page(record: &UploadRecord, base_url: &str) -> String {
     let size = human_size(record.size_bytes);
 
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>EkSend</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>EkSend</h1><p>Here is your file.</p></header><section class=\"card\"><div class=\"file-meta\"><h2>{}</h2><p>{} · uploaded {}</p><p class=\"expiry\">Expires in {}</p></div><div class=\"actions\"><a class=\"primary\" href=\"{}\">Download</a><button data-copy=\"{}\">Copy download page</button><button data-copy=\"{}\">Copy raw link</button></div><div class=\"code\"><span>curl</span><pre>curl -O '{}'</pre></div></section></main><script>{}</script></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>{}</h1><p>{}</p></header><section class=\"card\"><div class=\"file-meta\"><h2>{}</h2><p>{} · uploaded {}</p><p class=\"expiry\">Expires in {}</p></div><div class=\"actions\"><a class=\"primary\" href=\"{}\">Download</a><button data-copy=\"{}\">Copy download page</button><button data-copy=\"{}\">Copy raw link</button></div><div class=\"code\"><span>curl</span><pre>curl -O '{}'</pre></div></section></main><script>{}</script></body></html>",
+        title,
         base_css(),
+        title,
+        description,
         filename,
         size,
         created_at,
@@ -786,6 +821,8 @@ mod tests {
             code_min_len: 3,
             code_max_len: 8,
             code_retries: 3,
+            brand_title: "DKSend".to_string(),
+            brand_description: "Drop a file, get a link.".to_string(),
         };
 
         let (duration, warning) = clamp_expiry(Duration::from_secs(60), &config);

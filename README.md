@@ -1,6 +1,6 @@
-# EkSend
+# DKSend
 
-EkSend is a temporary file sharing server with a clean CLI + web UX.
+DKSend is a temporary file sharing server with a clean CLI + web UX.
 
 ## Quick start
 
@@ -33,6 +33,8 @@ Environment variables:
 - `MAX_FILE_SIZE` in bytes (default: 209715200)
 - `DEFAULT_EXPIRY` (default: `24h`)
 - `MAX_EXPIRY` (default: `7d`)
+- `BRAND_TITLE` (default: `DKSend`)
+- `BRAND_DESCRIPTION` (default: `Drop a file, get a link. No accounts, no fuss.`)
 
 Durations use `30m`, `1h`, `2d`.
 
@@ -41,20 +43,20 @@ Durations use `30m`, `1h`, `2d`.
 Build:
 
 ```bash
-docker build -t eksend .
+docker build -t dksend .
 ```
 
 Run:
 
 ```bash
-docker run --rm -p 3000:3000 -v $(pwd)/data:/data eksend
+docker run --rm -p 3000:3000 -v $(pwd)/data:/data dksend
 ```
 
 Podman:
 
 ```bash
-podman build -t eksend .
-podman run --rm -p 3000:3000 -v $(pwd)/data:/data eksend
+podman build -t dksend .
+podman run --rm -p 3000:3000 -v $(pwd)/data:/data dksend
 ```
 
 ## Behavior notes

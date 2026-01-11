@@ -320,7 +320,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "eksend"
+name = "dksend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
