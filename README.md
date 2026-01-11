@@ -59,6 +59,28 @@ podman build -t dksend .
 podman run --rm -p 3000:3000 -v $(pwd)/data:/data dksend
 ```
 
+## Deploy from GHCR
+
+The GitHub Actions workflow publishes multi-arch images to:
+
+`ghcr.io/adeekshith/dksend`
+
+Pull and run:
+
+```bash
+docker pull ghcr.io/adeekshith/dksend:latest
+docker run --rm -p 3000:3000 -v $(pwd)/data:/data ghcr.io/adeekshith/dksend:latest
+```
+
+Optional branding:
+
+```bash
+docker run --rm -p 3000:3000 -v $(pwd)/data:/data \\
+  -e BRAND_TITLE="My Share" \\
+  -e BRAND_DESCRIPTION="Fast, friendly file drops." \\
+  ghcr.io/adeekshith/dksend:latest
+```
+
 ## Behavior notes
 
 - Expiry is clamped to a minimum of 5 minutes and a maximum of 7 days.
