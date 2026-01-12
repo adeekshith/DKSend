@@ -29,11 +29,11 @@ Responses are JSON.
 
 Environment variables:
 
-- `DATA_DIR` (default: `./data`)
+- `DATA_DIR` (default: `./data`) - storage path for database + files
 - `MAX_FILE_SIZE` in bytes (default: 209715200)
 - `DEFAULT_EXPIRY` (default: `24h`)
 - `MAX_EXPIRY` (default: `7d`)
-- `BRAND_TITLE` (default: `DKSend`)
+- `BRAND_TITLE` (default: `DKSend`) - HTML title and header text
 - `BRAND_DESCRIPTION` (default: `Drop a file, get a link. No accounts, no fuss.`)
 
 Durations use `30m`, `1h`, `2d`.
@@ -72,10 +72,14 @@ docker pull ghcr.io/adeekshith/dksend:latest
 docker run --rm -p 3000:3000 -v $(pwd)/data:/data ghcr.io/adeekshith/dksend:latest
 ```
 
-Optional branding:
+Example Docker run with all environment variables:
 
 ```bash
 docker run --rm -p 3000:3000 -v $(pwd)/data:/data \\
+  -e DATA_DIR=/data \\
+  -e MAX_FILE_SIZE=209715200 \\
+  -e DEFAULT_EXPIRY=24h \\
+  -e MAX_EXPIRY=7d \\
   -e BRAND_TITLE="My Share" \\
   -e BRAND_DESCRIPTION="Fast, friendly file drops." \\
   ghcr.io/adeekshith/dksend:latest
