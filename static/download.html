@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{title}}</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <h1>{{title}}</h1>
+        <p>{{description}}</p>
+      </header>
+      <section class="card">
+        <div class="file-meta">
+          <h2>{{filename}}</h2>
+          <p>{{size}} · uploaded {{created_at}}</p>
+          <p class="expiry">Expires in {{expires_in}}</p>
+        </div>
+        <div class="actions">
+          <a class="primary" href="{{download_url}}">Download</a>
+          <button data-copy="{{download_page_url}}">Copy download page</button>
+          <button data-copy="{{download_url}}">Copy raw link</button>
+        </div>
+        <div class="code">
+          <span>curl</span>
+          <pre>curl -O '{{curl_url}}'</pre>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

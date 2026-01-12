@@ -1,0 +1,247 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f5f1ea;
+  --card: #fff7ea;
+  --ink: #1f1b16;
+  --accent: #ff8f3f;
+  --accent-dark: #c85b12;
+  --muted: #6b5e52;
+  --stroke: #e4d4c2;
+  --shadow: 0 20px 60px rgba(31, 27, 22, 0.1);
+  --code-bg: #1f1b16;
+  --code-ink: #f9efe2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12110f;
+    --card: #1b1915;
+    --ink: #f4ede5;
+    --accent: #ff9a4a;
+    --accent-dark: #ffb179;
+    --muted: #c4b8ac;
+    --stroke: #3b342c;
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    --code-bg: #0b0a09;
+    --code-ink: #f9efe2;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+  background: radial-gradient(circle at top, rgba(255, 230, 199, 0.5), transparent 60%),
+    linear-gradient(135deg, var(--bg), color-mix(in srgb, var(--bg), white 10%));
+  color: var(--ink);
+}
+
+.shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 48px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.hero h1 {
+  font-size: 56px;
+  margin: 0 0 12px;
+  letter-spacing: -1px;
+}
+
+.hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 18px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--stroke);
+  border-radius: 24px;
+  padding: 28px;
+  box-shadow: var(--shadow);
+}
+
+.drop {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed color-mix(in srgb, var(--stroke), transparent 20%);
+  border-radius: 20px;
+  padding: 32px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--card), transparent 20%);
+}
+
+.drop input {
+  display: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+input,
+select {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  font-size: 15px;
+  font-family: inherit;
+  background: transparent;
+  color: var(--ink);
+}
+
+button,
+.primary {
+  margin-top: 18px;
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: none;
+  background: var(--accent);
+  color: #1d1207;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+button:hover,
+.primary:hover {
+  background: var(--accent-dark);
+  color: #1d1207;
+}
+
+.result {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--card), white 6%);
+  border: 1px solid var(--stroke);
+}
+
+.result.hidden {
+  display: none;
+}
+
+.result a {
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.result-actions button {
+  background: transparent;
+  border: 1px solid var(--stroke);
+  color: var(--ink);
+}
+
+.notes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.notes h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.notes pre {
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: 16px;
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.file-meta h2 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.file-meta p {
+  margin: 6px 0;
+  color: var(--muted);
+}
+
+.expiry {
+  color: color-mix(in srgb, var(--accent-dark), var(--ink) 20%);
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.actions button {
+  background: transparent;
+  border: 1px solid var(--stroke);
+  color: var(--ink);
+}
+
+.code {
+  margin-top: 20px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: 16px;
+  border-radius: 12px;
+}
+
+.code span {
+  font-size: 12px;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent), white 10%);
+}
+
+.code pre {
+  margin: 8px 0 0;
+  overflow: auto;
+}
+
+.warn {
+  color: color-mix(in srgb, var(--accent-dark), var(--ink) 20%);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .hero h1 {
+    font-size: 40px;
+  }
+
+  .row,
+  .notes {
+    grid-template-columns: 1fr;
+  }
+}

@@ -5,18 +5,19 @@ RUN apk add --no-cache musl-dev build-base ca-certificates
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
-RUN cargo build --release
-
-COPY . .
+COPY src ./src
+COPY static ./static
+COPY migrations ./migrations
 RUN cargo build --release \
     && cp /app/target/release/dksend /dksend \
     && mkdir -p /data
 
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
+WORKDIR /app
 COPY --from=builder /dksend /dksend
 COPY --from=builder /data /data
+COPY --from=builder /app/static /app/static
 
 ENV DATA_DIR=/data
 EXPOSE 3000

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{title}}</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <h1>{{title}}</h1>
+        <p>{{description}}</p>
+      </header>
+      <section class="card">
+        <form id="upload-form">
+          <label class="drop">
+            <input type="file" id="file" required>
+            <span>Drag &amp; drop or click to choose a file</span>
+          </label>
+          <div class="row">
+            <label>
+              Filename override
+              <input type="text" id="filename" placeholder="Leave blank to keep original">
+            </label>
+            <label>
+              Expiry
+              <select id="expiry">
+                <option value="">24h (default)</option>
+                <option value="30m">30m</option>
+                <option value="1h">1h</option>
+                <option value="1d">1d</option>
+                <option value="7d">7d</option>
+              </select>
+            </label>
+          </div>
+          <button type="submit">Upload</button>
+        </form>
+        <div id="result" class="result hidden" data-result></div>
+      </section>
+      <section class="notes">
+        <div>
+          <h2>CLI quickstart</h2>
+          <pre>curl --upload-file ./hello.txt https://dksend.com</pre>
+        </div>
+        <div>
+          <h2>Raw downloads</h2>
+          <p>Use the raw link in scripts or curl.</p>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

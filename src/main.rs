@@ -18,11 +18,13 @@ use std::time::Duration;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
+use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 struct AppState {
     pool: Pool<Sqlite>,
     config: AppConfig,
+    templates: Templates,
 }
 
 #[derive(Clone)]
@@ -37,6 +39,13 @@ struct AppConfig {
     code_retries: usize,
     brand_title: String,
     brand_description: String,
+}
+
+#[derive(Clone)]
+struct Templates {
+    upload: String,
+    download: String,
+    error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +99,7 @@ async fn main() {
 
 async fn run() -> Result<(), anyhow::Error> {
     let config = load_config()?;
+    let templates = load_templates().await?;
     let db_path = config.data_dir.join("uploads.db");
     eprintln!(
         "DKSend startup: data_dir={}, db_path={}, max_file_size={}, default_expiry_secs={}, max_expiry_secs={}, brand_title=\"{}\"",
@@ -116,10 +126,15 @@ async fn run() -> Result<(), anyhow::Error> {
     eprintln!("DKSend: migrations complete");
 
     let brand_title = config.brand_title.clone();
-    let state = AppState { pool, config };
+    let state = AppState {
+        pool,
+        config,
+        templates,
+    };
 
     let app = Router::new()
         .route("/", get(upload_page).put(upload_handler))
+        .nest_service("/static", ServeDir::new("static"))
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
         .route("/:code", get(download_page_code))
@@ -139,6 +154,17 @@ async fn run() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+
+async fn load_templates() -> Result<Templates, anyhow::Error> {
+    let upload = fs::read_to_string("static/upload.html").await?;
+    let download = fs::read_to_string("static/download.html").await?;
+    let error = fs::read_to_string("static/error.html").await?;
+    Ok(Templates {
+        upload,
+        download,
+        error,
+    })
+}
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
@@ -336,7 +362,7 @@ async fn upload_handler(
 }
 
 async fn upload_page(State(state): State<AppState>) -> Html<String> {
-    Html(render_upload_page(&state.config))
+    Html(render_upload_page(&state.templates, &state.config))
 }
 
 async fn download_page_code(
@@ -367,6 +393,7 @@ async fn download_page(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist.",
+                &state.templates,
                 &state.config,
             )
         }
@@ -374,6 +401,7 @@ async fn download_page(
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
+                &state.templates,
                 &state.config,
             )
         }
@@ -383,6 +411,7 @@ async fn download_page(
         return html_error(
             StatusCode::GONE,
             "This file does not exist or is no longer available.",
+            &state.templates,
             &state.config,
         );
     }
@@ -396,7 +425,7 @@ async fn download_page(
         return Redirect::temporary(&canonical_url).into_response();
     }
 
-    Html(render_download_page(&record, &base_url, &state.config)).into_response()
+    Html(render_download_page(&record, &base_url, &state.templates, &state.config)).into_response()
 }
 
 async fn raw_download_code(
@@ -523,14 +552,14 @@ fn plain_error(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
 }
 
-fn html_error(status: StatusCode, message: &str, config: &AppConfig) -> Response {
+fn html_error(status: StatusCode, message: &str, templates: &Templates, config: &AppConfig) -> Response {
     let title = escape_html(&config.brand_title);
-    let page = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title><style>{}</style></head><body><main class=\"card\"><h1>{}</h1><p>{}</p><a href=\"/\">Upload a file</a></main></body></html>",
-        title,
-        base_css(),
-        title,
-        escape_html(message)
+    let page = render_template(
+        &templates.error,
+        &[
+            ("{{title}}", title.clone()),
+            ("{{message}}", escape_html(message)),
+        ],
     );
     (status, Html(page)).into_response()
 }
@@ -676,20 +705,32 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn render_upload_page(config: &AppConfig) -> String {
+fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
+    let mut output = template.to_string();
+    for (key, value) in replacements {
+        output = output.replace(key, value);
+    }
+    output
+}
+
+fn render_upload_page(templates: &Templates, config: &AppConfig) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
-    format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>{}</h1><p>{}</p></header><section class=\"card\"><form id=\"upload-form\"><label class=\"drop\"><input type=\"file\" id=\"file\" required><span>Drag &amp; drop or click to choose a file</span></label><div class=\"row\"><label>Filename override<input type=\"text\" id=\"filename\" placeholder=\"Leave blank to keep original\"></label><label>Expiry<select id=\"expiry\"><option value=\"\">24h (default)</option><option value=\"30m\">30m</option><option value=\"1h\">1h</option><option value=\"1d\">1d</option><option value=\"7d\">7d</option></select></label></div><button type=\"submit\">Upload</button></form><div id=\"result\" class=\"result hidden\"></div></section><section class=\"notes\"><div><h2>CLI quickstart</h2><pre>curl --upload-file ./hello.txt https://dksend.com</pre></div><div><h2>Raw downloads</h2><p>Use the raw link in scripts or curl.</p></div></section></main><script>{}</script></body></html>",
-        title,
-        base_css(),
-        title,
-        description,
-        upload_js()
+    render_template(
+        &templates.upload,
+        &[
+            ("{{title}}", title),
+            ("{{description}}", description),
+        ],
     )
 }
 
-fn render_download_page(record: &UploadRecord, base_url: &str, config: &AppConfig) -> String {
+fn render_download_page(
+    record: &UploadRecord,
+    base_url: &str,
+    templates: &Templates,
+    config: &AppConfig,
+) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
     let filename = escape_html(&record.original_filename);
@@ -700,98 +741,20 @@ fn render_download_page(record: &UploadRecord, base_url: &str, config: &AppConfi
     let created_at = record.created_at.to_rfc3339();
     let size = human_size(record.size_bytes);
 
-    format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>{}</style></head><body><main class=\"shell\"><header class=\"hero\"><h1>{}</h1><p>{}</p></header><section class=\"card\"><div class=\"file-meta\"><h2>{}</h2><p>{} · uploaded {}</p><p class=\"expiry\">Expires in {}</p></div><div class=\"actions\"><a class=\"primary\" href=\"{}\">Download</a><button data-copy=\"{}\">Copy download page</button><button data-copy=\"{}\">Copy raw link</button></div><div class=\"code\"><span>curl</span><pre>curl -O '{}'</pre></div></section></main><script>{}</script></body></html>",
-        title,
-        base_css(),
-        title,
-        description,
-        filename,
-        size,
-        created_at,
-        expires_in,
-        download_url,
-        download_page_url,
-        download_url,
-        download_url,
-        download_js()
+    render_template(
+        &templates.download,
+        &[
+            ("{{title}}", title),
+            ("{{description}}", description),
+            ("{{filename}}", filename),
+            ("{{size}}", size),
+            ("{{created_at}}", created_at),
+            ("{{expires_in}}", expires_in),
+            ("{{download_url}}", download_url.clone()),
+            ("{{download_page_url}}", download_page_url),
+            ("{{curl_url}}", download_url),
+        ],
     )
-}
-
-fn base_css() -> String {
-    [
-        ":root{--bg:#f5f1ea;--card:#fff7ea;--ink:#1f1b16;--accent:#ff8f3f;--accent-dark:#c85b12;--muted:#6b5e52;--stroke:#e4d4c2;--shadow:0 20px 60px rgba(31,27,22,.1)}",
-        "*{box-sizing:border-box}",
-        "body{margin:0;font-family:'Space Grotesk','Avenir Next','Segoe UI',sans-serif;background:radial-gradient(circle at top,#ffe6c7,transparent 60%),linear-gradient(135deg,#f5f1ea,#fff);color:var(--ink)}",
-        ".shell{max-width:960px;margin:0 auto;padding:48px 20px 80px;display:flex;flex-direction:column;gap:32px}",
-        ".hero h1{font-size:56px;margin:0 0 12px;letter-spacing:-1px}",
-        ".hero p{margin:0;color:var(--muted);font-size:18px}",
-        ".card{background:var(--card);border:1px solid var(--stroke);border-radius:24px;padding:28px;box-shadow:var(--shadow)}",
-        ".drop{display:flex;flex-direction:column;gap:10px;align-items:center;justify-content:center;border:2px dashed #e8c7a6;border-radius:20px;padding:32px;cursor:pointer;background:rgba(255,255,255,.7)}",
-        ".drop input{display:none}",
-        ".row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}",
-        "label{display:flex;flex-direction:column;gap:8px;font-size:14px;color:var(--muted)}",
-        "input,select{padding:12px 14px;border-radius:12px;border:1px solid var(--stroke);font-size:15px;font-family:inherit}",
-        "button,.primary{margin-top:18px;padding:12px 18px;border-radius:12px;border:none;background:var(--accent);color:#1d1207;font-weight:600;font-size:15px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}",
-        "button:hover,.primary:hover{background:var(--accent-dark);color:#fff}",
-        ".result{margin-top:20px;padding:16px;border-radius:14px;background:#fff;border:1px solid var(--stroke)}",
-        ".result.hidden{display:none}",
-        ".result a{color:var(--accent-dark);font-weight:600}",
-        ".notes{display:grid;grid-template-columns:1fr 1fr;gap:20px}",
-        ".notes h2{margin:0 0 8px;font-size:18px}",
-        ".notes pre{background:#1f1b16;color:#f9efe2;padding:16px;border-radius:12px;overflow:auto}",
-        ".file-meta h2{margin:0 0 8px;font-size:28px}",
-        ".file-meta p{margin:6px 0;color:var(--muted)}",
-        ".expiry{color:#a24c16;font-weight:600}",
-        ".actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px}",
-        ".actions button{background:#fff;border:1px solid var(--stroke);color:var(--ink)}",
-        ".actions button:hover{background:#1f1b16;color:#fff}",
-        ".code{margin-top:20px;background:#1f1b16;color:#f9efe2;padding:16px;border-radius:12px}",
-        ".code span{font-size:12px;text-transform:uppercase;color:#ffcf99}",
-        ".code pre{margin:8px 0 0;overflow:auto}",
-        ".warn{color:#a24c16;font-weight:600}",
-        "@media (max-width:720px){.hero h1{font-size:40px}.row,.notes{grid-template-columns:1fr}}",
-    ]
-    .join("")
-}
-
-fn upload_js() -> String {
-    [
-        "const form=document.getElementById('upload-form');",
-        "const fileInput=document.getElementById('file');",
-        "const result=document.getElementById('result');",
-        "const filenameInput=document.getElementById('filename');",
-        "const expirySelect=document.getElementById('expiry');",
-        "form.addEventListener('submit',async(e)=>{e.preventDefault();",
-        "const file=fileInput.files[0];if(!file){return;}",
-        "const params=new URLSearchParams();",
-        "const name=filenameInput.value.trim()||file.name;",
-        "if(name){params.set('name',name);}",
-        "if(expirySelect.value){params.set('expires',expirySelect.value);}",
-        "result.classList.remove('hidden');",
-        "result.innerHTML='Uploading...';",
-        "try{const res=await fetch('/?'+params.toString(),{method:'PUT',body:file});",
-        "const data=await res.json();",
-        "if(!data.success){throw new Error(data.error?.message||'Upload failed');}",
-        r#"const warning=data.warning?`<p class="warn">${data.warning}</p>`:'';"#,
-        r#"result.innerHTML=`<h3>Uploaded</h3><p><strong>${data.filename}</strong> (${Math.round(data.size_bytes/1024)} KB)</p>${warning}<p><a href="${data.download_page_url}">Download page</a></p><p><a href="${data.raw_download_url}">Raw link</a></p>`;"#,
-        r#"}catch(err){result.innerHTML=`<p class="warn">${err.message}</p>`;}"#,
-        "});",
-    ]
-    .join("")
-}
-
-fn download_js() -> String {
-    [
-        "document.querySelectorAll('[data-copy]').forEach(btn=>{",
-        "btn.addEventListener('click',async()=>{",
-        "const original=btn.textContent;",
-        "const text=btn.getAttribute('data-copy');",
-        "try{await navigator.clipboard.writeText(text);btn.textContent='Copied!';setTimeout(()=>btn.textContent=original,1500);}catch(_){btn.textContent='Copy failed';}",
-        "});",
-        "});",
-    ]
-    .join("")
 }
 
 #[cfg(test)]
