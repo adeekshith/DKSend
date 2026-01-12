@@ -91,6 +91,15 @@ async fn main() {
 async fn run() -> Result<(), anyhow::Error> {
     let config = load_config()?;
     let db_path = config.data_dir.join("uploads.db");
+    eprintln!(
+        "DKSend startup: data_dir={}, db_path={}, max_file_size={}, default_expiry_secs={}, max_expiry_secs={}, brand_title=\"{}\"",
+        config.data_dir.display(),
+        db_path.display(),
+        config.max_file_size,
+        config.default_expiry.as_secs(),
+        config.max_expiry.as_secs(),
+        config.brand_title
+    );
     fs::create_dir_all(config.data_dir.join("files")).await?;
 
     let pool = SqlitePoolOptions::new()
@@ -102,7 +111,9 @@ async fn run() -> Result<(), anyhow::Error> {
         )
         .await?;
 
+    eprintln!("DKSend: running migrations");
     sqlx::migrate!("./migrations").run(&pool).await?;
+    eprintln!("DKSend: migrations complete");
 
     let brand_title = config.brand_title.clone();
     let state = AppState { pool, config };

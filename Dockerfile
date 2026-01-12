@@ -13,8 +13,8 @@ RUN cargo build --release \
     && cp /app/target/release/dksend /dksend \
     && mkdir -p /data
 
-FROM scratch
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
 COPY --from=builder /dksend /dksend
 COPY --from=builder /data /data
 
