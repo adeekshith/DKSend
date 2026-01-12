@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::signal;
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
@@ -124,18 +123,11 @@ async fn run() -> Result<(), anyhow::Error> {
     let listen_addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     println!("{} listening on http://{listen_addr}", brand_title);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
-    if signal::ctrl_c().await.is_err() {
-        futures_util::future::pending::<()>().await;
-    }
-}
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
     let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());

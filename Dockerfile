@@ -1,26 +1,16 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.85-slim AS builder
+FROM rust:alpine AS builder
 
-ARG TARGETARCH
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools pkg-config ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN case "$TARGETARCH" in \
-        amd64) echo x86_64-unknown-linux-musl > /tmp/target ;; \
-        arm64) echo aarch64-unknown-linux-musl > /tmp/target ;; \
-        *) echo "unsupported arch: $TARGETARCH" && exit 1 ;; \
-    esac \
-    && rustup target add "$(cat /tmp/target)"
+RUN apk add --no-cache musl-dev build-base ca-certificates
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
-RUN cargo build --release --target "$(cat /tmp/target)"
+RUN cargo build --release
 
 COPY . .
-RUN cargo build --release --target "$(cat /tmp/target)" \
-    && cp "/app/target/$(cat /tmp/target)/release/dksend" /dksend \
+RUN cargo build --release \
+    && cp /app/target/release/dksend /dksend \
     && mkdir -p /data
 
 FROM scratch
