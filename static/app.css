@@ -1,29 +1,29 @@
 :root {
   color-scheme: light dark;
-  --bg: #f5f1ea;
-  --card: #fff7ea;
-  --ink: #1f1b16;
-  --accent: #ff8f3f;
-  --accent-dark: #c85b12;
-  --muted: #6b5e52;
-  --stroke: #e4d4c2;
-  --shadow: 0 20px 60px rgba(31, 27, 22, 0.1);
-  --code-bg: #1f1b16;
-  --code-ink: #f9efe2;
+  --bg: #f4f4f2;
+  --card: #ffffff;
+  --ink: #1c1c1a;
+  --accent: #2563eb;
+  --accent-dark: #1d4ed8;
+  --muted: #6b6b63;
+  --stroke: #d7d7d2;
+  --shadow: 0 10px 30px rgba(28, 28, 26, 0.08);
+  --code-bg: #1a1a19;
+  --code-ink: #f2f2ef;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12110f;
-    --card: #1b1915;
-    --ink: #f4ede5;
-    --accent: #ff9a4a;
-    --accent-dark: #ffb179;
-    --muted: #c4b8ac;
-    --stroke: #3b342c;
-    --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
-    --code-bg: #0b0a09;
-    --code-ink: #f9efe2;
+    --bg: #10100f;
+    --card: #181816;
+    --ink: #f1f1ed;
+    --accent: #6ea8ff;
+    --accent-dark: #93c0ff;
+    --muted: #a7a79c;
+    --stroke: #2a2a27;
+    --shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+    --code-bg: #0b0b0a;
+    --code-ink: #f1f1ed;
   }
 }
 
@@ -34,8 +34,7 @@
 body {
   margin: 0;
   font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top, rgba(255, 230, 199, 0.5), transparent 60%),
-    linear-gradient(135deg, var(--bg), color-mix(in srgb, var(--bg), white 10%));
+  background: var(--bg);
   color: var(--ink);
 }
 
@@ -63,7 +62,7 @@ body {
 .card {
   background: var(--card);
   border: 1px solid var(--stroke);
-  border-radius: 24px;
+  border-radius: 18px;
   padding: 28px;
   box-shadow: var(--shadow);
 }
@@ -74,11 +73,11 @@ body {
   gap: 10px;
   align-items: center;
   justify-content: center;
-  border: 2px dashed color-mix(in srgb, var(--stroke), transparent 20%);
+  border: 1px dashed var(--stroke);
   border-radius: 20px;
   padding: 32px;
   cursor: pointer;
-  background: color-mix(in srgb, var(--card), transparent 20%);
+  background: transparent;
 }
 
 .drop input {
@@ -118,7 +117,7 @@ button,
   border-radius: 12px;
   border: none;
   background: var(--accent);
-  color: #1d1207;
+  color: #ffffff;
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
@@ -131,14 +130,14 @@ button,
 button:hover,
 .primary:hover {
   background: var(--accent-dark);
-  color: #1d1207;
+  color: #ffffff;
 }
 
 .result {
   margin-top: 20px;
   padding: 16px;
   border-radius: 14px;
-  background: color-mix(in srgb, var(--card), white 6%);
+  background: var(--card);
   border: 1px solid var(--stroke);
 }
 
@@ -159,7 +158,7 @@ button:hover,
 }
 
 .result-actions button {
-  background: transparent;
+  background: var(--card);
   border: 1px solid var(--stroke);
   color: var(--ink);
 }
@@ -206,7 +205,7 @@ button:hover,
 }
 
 .actions button {
-  background: transparent;
+  background: var(--card);
   border: 1px solid var(--stroke);
   color: var(--ink);
 }
@@ -222,7 +221,7 @@ button:hover,
 .code span {
   font-size: 12px;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--accent), white 10%);
+  color: color-mix(in srgb, var(--accent), white 20%);
 }
 
 .code pre {
@@ -231,7 +230,7 @@ button:hover,
 }
 
 .warn {
-  color: color-mix(in srgb, var(--accent-dark), var(--ink) 20%);
+  color: color-mix(in srgb, var(--accent), var(--ink) 20%);
   font-weight: 600;
 }
 
