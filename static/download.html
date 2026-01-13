@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{title}}</title>
-    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/app.css?v=1">
   </head>
   <body>
     <main class="shell">
@@ -20,8 +20,16 @@
         </div>
         <div class="actions">
           <a class="primary" href="{{download_url}}">Download</a>
-          <button data-copy="{{download_page_url}}">Copy download page</button>
-          <button data-copy="{{download_url}}">Copy raw link</button>
+        </div>
+        <div class="link-list">
+          <div class="link-row">
+            <input type="text" readonly value="{{download_page_url}}">
+            <button type="button" data-copy="{{download_page_url}}">Copy</button>
+          </div>
+          <div class="link-row">
+            <input type="text" readonly value="{{download_url}}">
+            <button type="button" data-copy="{{download_url}}">Copy</button>
+          </div>
         </div>
         <div class="code">
           <span>curl</span>
@@ -29,6 +37,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=1" defer></script>
   </body>
 </html>

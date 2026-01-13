@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{title}}</title>
-    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/app.css?v=1">
   </head>
   <body>
     <main class="shell">
@@ -14,7 +14,7 @@
       </header>
       <section class="card">
         <form id="upload-form">
-          <label class="drop">
+          <label class="drop" id="drop-zone">
             <input type="file" id="file" required>
             <span>Drag &amp; drop or click to choose a file</span>
           </label>
@@ -49,6 +49,6 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=1" defer></script>
   </body>
 </html>

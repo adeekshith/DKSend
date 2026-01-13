@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
+    routing::{get, get_service},
     Json, Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -19,6 +19,7 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[derive(Clone)]
 struct AppState {
@@ -132,9 +133,16 @@ async fn run() -> Result<(), anyhow::Error> {
         templates,
     };
 
+    let static_service = get_service(ServeDir::new("static")).layer(
+        SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        ),
+    );
+
     let app = Router::new()
         .route("/", get(upload_page).put(upload_handler))
-        .nest_service("/static", ServeDir::new("static"))
+        .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
         .route("/:code", get(download_page_code))

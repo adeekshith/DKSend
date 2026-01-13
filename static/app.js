@@ -1,5 +1,6 @@
 const uploadForm = document.getElementById('upload-form');
 const result = document.querySelector('[data-result]');
+const dropZone = document.getElementById('drop-zone');
 
 const copyText = async (text) => {
   try {
@@ -50,10 +51,63 @@ if (uploadForm) {
   const fileInput = document.getElementById('file');
   const filenameInput = document.getElementById('filename');
   const expirySelect = document.getElementById('expiry');
+  let droppedFile = null;
+  const dropLabel = dropZone?.querySelector('span');
+
+  const setDragging = (active) => {
+    if (dropZone) {
+      dropZone.classList.toggle('dragging', active);
+    }
+  };
+
+  ['dragenter', 'dragover'].forEach((eventName) => {
+    dropZone?.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setDragging(true);
+    });
+  });
+
+  ['dragleave', 'dragend'].forEach((eventName) => {
+    dropZone?.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setDragging(false);
+    });
+  });
+
+  dropZone?.addEventListener('drop', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragging(false);
+    const files = event.dataTransfer?.files;
+    if (files && files.length) {
+      droppedFile = files[0];
+      if (dropLabel) {
+        dropLabel.textContent = droppedFile.name;
+      }
+    }
+  });
+
+  ['dragenter', 'dragover', 'drop'].forEach((eventName) => {
+    document.addEventListener(eventName, (event) => {
+      event.preventDefault();
+    });
+  });
+
+  fileInput?.addEventListener('change', () => {
+    const file = fileInput?.files?.[0];
+    if (file) {
+      droppedFile = file;
+      if (dropLabel) {
+        dropLabel.textContent = file.name;
+      }
+    }
+  });
 
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const file = fileInput?.files?.[0];
+    const file = droppedFile || fileInput?.files?.[0];
     if (!file) {
       return;
     }
@@ -85,8 +139,16 @@ if (uploadForm) {
           ${warning}
           <div class="result-actions">
             <a href="${data.download_page_url}">Open download page</a>
-            <button type="button" data-copy="${data.download_page_url}">Copy download page</button>
-            <button type="button" data-copy="${data.raw_download_url}">Copy raw link</button>
+          </div>
+          <div class="link-list">
+            <div class="link-row">
+              <input type="text" readonly value="${data.download_page_url}">
+              <button type="button" data-copy="${data.download_page_url}">Copy</button>
+            </div>
+            <div class="link-row">
+              <input type="text" readonly value="${data.raw_download_url}">
+              <button type="button" data-copy="${data.raw_download_url}">Copy</button>
+            </div>
           </div>
         `;
       }

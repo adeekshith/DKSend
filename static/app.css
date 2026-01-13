@@ -45,6 +45,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 32px;
+  align-items: center;
+}
+
+.shell > * {
+  width: 100%;
+}
+
+.hero {
+  text-align: center;
 }
 
 .hero h1 {
@@ -65,6 +74,11 @@ body {
   border-radius: 18px;
   padding: 28px;
   box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.card form {
+  text-align: left;
 }
 
 .drop {
@@ -78,10 +92,16 @@ body {
   padding: 32px;
   cursor: pointer;
   background: transparent;
+  text-align: center;
 }
 
 .drop input {
   display: none;
+}
+
+.drop.dragging {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--card), var(--accent) 6%);
 }
 
 .row {
@@ -163,10 +183,33 @@ button:hover,
   color: var(--ink);
 }
 
+.link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.link-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.link-row input {
+  flex: 1;
+}
+
+.link-row button {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
 .notes {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+  text-align: center;
 }
 
 .notes h2 {
@@ -180,6 +223,7 @@ button:hover,
   padding: 16px;
   border-radius: 12px;
   overflow: auto;
+  text-align: left;
 }
 
 .file-meta h2 {
@@ -202,6 +246,7 @@ button:hover,
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 20px;
+  justify-content: center;
 }
 
 .actions button {
@@ -234,6 +279,11 @@ button:hover,
   font-weight: 600;
 }
 
+.result h3,
+.file-meta {
+  text-align: center;
+}
+
 @media (max-width: 720px) {
   .hero h1 {
     font-size: 40px;
@@ -242,5 +292,10 @@ button:hover,
   .row,
   .notes {
     grid-template-columns: 1fr;
+  }
+
+  .link-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
