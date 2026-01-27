@@ -14,11 +14,14 @@ Server listens on `http://localhost:3000`.
 
 ```bash
 curl --upload-file ./hello.txt http://localhost:3000
+curl --upload-file ./hello.txt http://localhost:3000/hello.txt
 curl --upload-file ./hello.txt "http://localhost:3000/?expires=1h"
 curl --upload-file ./hello.txt "http://localhost:3000/?name=hello.txt"
+curl -H "Accept: text/plain" --upload-file ./hello.txt http://localhost:3000/hello.txt
+curl --upload-file ./hello.txt "http://localhost:3000/hello.txt?output=plain"
 ```
 
-Responses are JSON.
+Responses are JSON by default. Use `Accept: text/plain` or `output=plain` for a bare share URL.
 
 ## Download
 

@@ -78,6 +78,8 @@ struct ErrorBody {
 struct UploadQuery {
     expires: Option<String>,
     name: Option<String>,
+    format: Option<String>,
+    output: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +90,12 @@ struct UploadRecord {
     size_bytes: u64,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadResponseMode {
+    Json,
+    Plain,
 }
 
 #[tokio::main]
@@ -145,7 +153,7 @@ async fn run() -> Result<(), anyhow::Error> {
         .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
-        .route("/:code", get(download_page_code))
+        .route("/:code", get(download_page_code).put(upload_handler_named))
         .route("/:code/:filename", get(download_page_named))
         .with_state(state.clone());
 
@@ -222,13 +230,49 @@ async fn upload_handler(
     Query(params): Query<UploadQuery>,
     body: Body,
 ) -> Response {
+    handle_upload(state, headers, params, body).await
+}
+
+async fn upload_handler_named(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(filename): Path<String>,
+    Query(mut params): Query<UploadQuery>,
+    body: Body,
+) -> Response {
+    if params
+        .name
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        params.name = Some(filename);
+    }
+    handle_upload(state, headers, params, body).await
+}
+
+async fn handle_upload(
+    state: AppState,
+    headers: HeaderMap,
+    params: UploadQuery,
+    body: Body,
+) -> Response {
+    let response_mode = upload_response_mode(&headers, &params);
     let content_length = match headers.get(header::CONTENT_LENGTH) {
         Some(value) => match value.to_str().ok().and_then(|v| v.parse::<u64>().ok()) {
             Some(length) => length,
-            None => return json_error(StatusCode::BAD_REQUEST, "CONTENT_LENGTH_INVALID", "Content-Length must be a valid number."),
+            None => {
+                return upload_error(
+                    response_mode,
+                    StatusCode::BAD_REQUEST,
+                    "CONTENT_LENGTH_INVALID",
+                    "Content-Length must be a valid number.",
+                )
+            }
         },
         None => {
-            return json_error(
+            return upload_error(
+                response_mode,
                 StatusCode::BAD_REQUEST,
                 "CONTENT_LENGTH_REQUIRED",
                 "Content-Length header is required.",
@@ -237,7 +281,8 @@ async fn upload_handler(
     };
 
     if content_length > state.config.max_file_size {
-        return json_error(
+        return upload_error(
+            response_mode,
             StatusCode::PAYLOAD_TOO_LARGE,
             "FILE_TOO_LARGE",
             "File exceeds the configured size limit.",
@@ -259,7 +304,8 @@ async fn upload_handler(
         Some(value) => match parse_duration(value) {
             Ok(duration) => clamp_expiry(duration, &state.config),
             Err(_) => {
-                return json_error(
+                return upload_error(
+                    response_mode,
                     StatusCode::BAD_REQUEST,
                     "EXPIRY_INVALID",
                     "Expiry must be in the format <number><unit>, e.g. 30m, 1h, 2d.",
@@ -272,7 +318,8 @@ async fn upload_handler(
     let code = match generate_code(&state.pool, &state.config).await {
         Ok(code) => code,
         Err(_) => {
-            return json_error(
+            return upload_error(
+                response_mode,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "CODE_GENERATION_FAILED",
                 "Could not allocate a share code. Please retry.",
@@ -284,7 +331,8 @@ async fn upload_handler(
     let mut file = match File::create(&file_path).await {
         Ok(file) => file,
         Err(_) => {
-            return json_error(
+            return upload_error(
+                response_mode,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "FILE_STORE_FAILED",
                 "Could not store the uploaded file.",
@@ -299,7 +347,8 @@ async fn upload_handler(
             Ok(bytes) => bytes,
             Err(_) => {
                 let _ = fs::remove_file(&file_path).await;
-                return json_error(
+                return upload_error(
+                    response_mode,
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "UPLOAD_STREAM_ERROR",
                     "Failed while reading the upload stream.",
@@ -309,7 +358,8 @@ async fn upload_handler(
         size_written += chunk.len() as u64;
         if size_written > state.config.max_file_size {
             let _ = fs::remove_file(&file_path).await;
-            return json_error(
+            return upload_error(
+                response_mode,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "FILE_TOO_LARGE",
                 "File exceeds the configured size limit.",
@@ -317,7 +367,8 @@ async fn upload_handler(
         }
         if let Err(_) = file.write_all(&chunk).await {
             let _ = fs::remove_file(&file_path).await;
-            return json_error(
+            return upload_error(
+                response_mode,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "FILE_STORE_FAILED",
                 "Could not store the uploaded file.",
@@ -342,7 +393,8 @@ async fn upload_handler(
     .await
     {
         let _ = fs::remove_file(&file_path).await;
-        return json_error(
+        return upload_error(
+            response_mode,
             StatusCode::INTERNAL_SERVER_ERROR,
             "DB_WRITE_FAILED",
             "Could not store upload metadata.",
@@ -361,12 +413,15 @@ async fn upload_handler(
         size_bytes: size_written,
         expires_at: expires_at.to_rfc3339(),
         expires_in_seconds: (expires_at - now).num_seconds(),
-        download_page_url,
+        download_page_url: download_page_url.clone(),
         raw_download_url,
         warning,
     };
 
-    (StatusCode::CREATED, Json(response)).into_response()
+    match response_mode {
+        UploadResponseMode::Json => (StatusCode::CREATED, Json(response)).into_response(),
+        UploadResponseMode::Plain => (StatusCode::CREATED, format!("{download_page_url}\n")).into_response(),
+    }
 }
 
 async fn upload_page(State(state): State<AppState>) -> Html<String> {
@@ -556,6 +611,13 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
+fn upload_error(mode: UploadResponseMode, status: StatusCode, code: &str, message: &str) -> Response {
+    match mode {
+        UploadResponseMode::Json => json_error(status, code, message),
+        UploadResponseMode::Plain => plain_error(status, message),
+    }
+}
+
 fn plain_error(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
 }
@@ -670,6 +732,38 @@ fn base_url_from_headers(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost:3000");
     format!("{scheme}://{host}")
+}
+
+fn upload_response_mode(headers: &HeaderMap, params: &UploadQuery) -> UploadResponseMode {
+    let forced = params
+        .output
+        .as_deref()
+        .or(params.format.as_deref())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if let Some(value) = forced {
+        if value == "plain" || value == "text" {
+            return UploadResponseMode::Plain;
+        }
+        if value == "json" {
+            return UploadResponseMode::Json;
+        }
+    }
+
+    if let Some(accept) = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+    {
+        let accept_lower = accept.to_ascii_lowercase();
+        let wants_plain = accept_lower
+            .split(',')
+            .any(|value| value.trim().starts_with("text/plain"));
+        let wants_json = accept_lower.contains("application/json");
+        if wants_plain && !wants_json {
+            return UploadResponseMode::Plain;
+        }
+    }
+
+    UploadResponseMode::Json
 }
 
 fn human_size(bytes: u64) -> String {
