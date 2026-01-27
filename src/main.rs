@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, get_service},
-    Json, Router,
+    Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
@@ -419,7 +419,7 @@ async fn handle_upload(
     };
 
     match response_mode {
-        UploadResponseMode::Json => (StatusCode::CREATED, Json(response)).into_response(),
+        UploadResponseMode::Json => json_response(StatusCode::CREATED, &response),
         UploadResponseMode::Plain => (StatusCode::CREATED, format!("{download_page_url}\n")).into_response(),
     }
 }
@@ -608,7 +608,12 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
             message: message.to_string(),
         },
     };
-    (status, Json(body)).into_response()
+    json_response(status, &body)
+}
+
+fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+    let body = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 fn upload_error(mode: UploadResponseMode, status: StatusCode, code: &str, message: &str) -> Response {

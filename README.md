@@ -21,7 +21,7 @@ curl -H "Accept: text/plain" --upload-file ./hello.txt http://localhost:3000/hel
 curl --upload-file ./hello.txt "http://localhost:3000/hello.txt?output=plain"
 ```
 
-Responses are JSON by default. Use `Accept: text/plain` or `output=plain` for a bare share URL.
+Responses are JSON (pretty-printed) by default. Use `Accept: text/plain` or `output=plain` for a bare share URL.
 
 ## Download
 
