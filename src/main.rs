@@ -862,6 +862,7 @@ fn render_download_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
     fn parse_duration_valid() {
@@ -920,5 +921,72 @@ mod tests {
         assert!(code.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));
         assert!(!code.contains('o'));
         assert!(!code.contains('0'));
+    }
+
+    #[test]
+    fn upload_response_mode_defaults_to_json() {
+        let headers = HeaderMap::new();
+        let params = UploadQuery {
+            expires: None,
+            name: None,
+            format: None,
+            output: None,
+        };
+        assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Json);
+    }
+
+    #[test]
+    fn upload_response_mode_accept_plain_text() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/plain"));
+        let params = UploadQuery {
+            expires: None,
+            name: None,
+            format: None,
+            output: None,
+        };
+        assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Plain);
+    }
+
+    #[test]
+    fn upload_response_mode_accept_plain_and_json_prefers_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/plain, application/json"),
+        );
+        let params = UploadQuery {
+            expires: None,
+            name: None,
+            format: None,
+            output: None,
+        };
+        assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Json);
+    }
+
+    #[test]
+    fn upload_response_mode_output_plain_overrides_accept() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        let params = UploadQuery {
+            expires: None,
+            name: None,
+            format: None,
+            output: Some(" plain ".to_string()),
+        };
+        assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Plain);
+    }
+
+    #[test]
+    fn upload_response_mode_format_json_overrides_accept() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/plain"));
+        let params = UploadQuery {
+            expires: None,
+            name: None,
+            format: Some("json".to_string()),
+            output: None,
+        };
+        assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Json);
     }
 }
