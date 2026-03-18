@@ -280,6 +280,15 @@ async fn handle_upload(
         }
     };
 
+    if content_length == 0 {
+        return upload_error(
+            response_mode,
+            StatusCode::BAD_REQUEST,
+            "FILE_EMPTY",
+            "Cannot upload an empty file.",
+        );
+    }
+
     if content_length > state.config.max_file_size {
         return upload_error(
             response_mode,
@@ -582,21 +591,37 @@ async fn cleanup_loop(state: AppState) {
             .await
         {
             Ok(rows) => rows,
-            Err(_) => continue,
+            Err(err) => {
+                eprintln!("cleanup: failed to query expired uploads: {err}");
+                continue;
+            }
         };
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        eprintln!("cleanup: removing {} expired upload(s)", rows.len());
+
+        // Delete DB records first — orphaned files on disk are less harmful
+        // than dangling DB records pointing to missing files.
+        if let Err(err) = sqlx::query("DELETE FROM uploads WHERE expires_at <= ?")
+            .bind(&now)
+            .execute(&state.pool)
+            .await
+        {
+            eprintln!("cleanup: failed to delete expired records: {err}");
+        }
 
         for row in rows {
             let stored_path: String = match row.try_get("stored_path") {
                 Ok(path) => path,
                 Err(_) => continue,
             };
-            let _ = fs::remove_file(&stored_path).await;
+            if let Err(err) = fs::remove_file(&stored_path).await {
+                eprintln!("cleanup: failed to remove file {stored_path}: {err}");
+            }
         }
-
-        let _ = sqlx::query("DELETE FROM uploads WHERE expires_at <= ?")
-            .bind(&now)
-            .execute(&state.pool)
-            .await;
     }
 }
 
@@ -1132,6 +1157,28 @@ mod tests {
         let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["success"], false);
         assert_eq!(data["error"]["code"], "CONTENT_LENGTH_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn upload_empty_file_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(
+                Request::put("/?name=empty.txt")
+                    .header("content-length", "0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["error"]["code"], "FILE_EMPTY");
     }
 
     #[tokio::test]

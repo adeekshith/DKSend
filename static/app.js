@@ -105,12 +105,24 @@ if (uploadForm) {
     }
   });
 
+  const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
+  const submitButton = uploadForm.querySelector('button[type="submit"]');
+
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const file = droppedFile || fileInput?.files?.[0];
     if (!file) {
       return;
     }
+
+    if (file.size > MAX_FILE_SIZE) {
+      if (result) {
+        result.classList.remove('hidden');
+        result.innerHTML = `<p class="warn">File is too large (${Math.round(file.size / 1024 / 1024)} MB). Maximum size is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB.</p>`;
+      }
+      return;
+    }
+
     const params = new URLSearchParams();
     const name = (filenameInput?.value || '').trim() || file.name;
     if (name) {
@@ -123,6 +135,10 @@ if (uploadForm) {
     if (result) {
       result.classList.remove('hidden');
       result.innerHTML = 'Uploading...';
+    }
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = 'Uploading...';
     }
 
     try {
@@ -155,6 +171,11 @@ if (uploadForm) {
     } catch (err) {
       if (result) {
         result.innerHTML = `<p class="warn">${err.message}</p>`;
+      }
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Upload';
       }
     }
   });
