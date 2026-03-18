@@ -88,6 +88,20 @@ docker run --rm -p 3000:3000 -v $(pwd)/data:/data \\
   ghcr.io/adeekshith/dksend:latest
 ```
 
+## Testing
+
+Rust (backend + integration tests):
+
+```bash
+cargo test
+```
+
+JavaScript (frontend drag-and-drop tests):
+
+```bash
+node --test static/app.test.js
+```
+
 ## Behavior notes
 
 - Expiry is clamped to a minimum of 5 minutes and a maximum of 7 days.

@@ -868,6 +868,49 @@ fn render_download_page(
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn test_state(tmp: &std::path::Path) -> AppState {
+        let data_dir = tmp.join("data");
+        tokio::fs::create_dir_all(data_dir.join("files")).await.unwrap();
+        let db_path = data_dir.join("uploads.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let templates = load_templates().await.unwrap();
+        let config = AppConfig {
+            data_dir,
+            max_file_size: 1024 * 1024,
+            default_expiry: Duration::from_secs(3600),
+            min_expiry: Duration::from_secs(300),
+            max_expiry: Duration::from_secs(86400),
+            code_min_len: 3,
+            code_max_len: 8,
+            code_retries: 5,
+            brand_title: "Test".to_string(),
+            brand_description: "Test instance".to_string(),
+        };
+        AppState { pool, config, templates }
+    }
+
+    fn test_app(state: AppState) -> Router {
+        Router::new()
+            .route("/", get(upload_page).put(upload_handler))
+            .route("/:code", get(download_page_code).put(upload_handler_named))
+            .route("/:code/:filename", get(download_page_named))
+            .route("/raw/:code", get(raw_download_code))
+            .route("/raw/:code/:filename", get(raw_download_named))
+            .with_state(state)
+    }
 
     #[test]
     fn parse_duration_valid() {
@@ -993,5 +1036,224 @@ mod tests {
             output: None,
         };
         assert_eq!(upload_response_mode(&headers, &params), UploadResponseMode::Json);
+    }
+
+    #[test]
+    fn upload_page_file_input_not_required() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+        };
+        let config = AppConfig {
+            data_dir: PathBuf::from("./data"),
+            max_file_size: 1024,
+            default_expiry: Duration::from_secs(3600),
+            min_expiry: Duration::from_secs(300),
+            max_expiry: Duration::from_secs(86400),
+            code_min_len: 3,
+            code_max_len: 8,
+            code_retries: 3,
+            brand_title: "Test".to_string(),
+            brand_description: "Test".to_string(),
+        };
+        let html = render_upload_page(&templates, &config);
+        assert!(
+            !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
+            "file input must not have the required attribute (breaks drag-and-drop)"
+        );
+        assert!(html.contains(r#"id="drop-zone""#));
+        assert!(html.contains(r#"type="file""#));
+    }
+
+    #[tokio::test]
+    async fn upload_page_returns_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("drop-zone"));
+        assert!(html.contains("upload-form"));
+    }
+
+    #[tokio::test]
+    async fn upload_file_via_put() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let body = "hello world";
+        let response = app
+            .oneshot(
+                Request::put("/?name=test.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["success"], true);
+        assert_eq!(data["filename"], "test.txt");
+        assert_eq!(data["size_bytes"], body.len());
+        assert!(data["code"].as_str().unwrap().len() >= 3);
+        assert!(data["download_page_url"].as_str().unwrap().contains("test.txt"));
+        assert!(data["raw_download_url"].as_str().unwrap().contains("/raw/"));
+    }
+
+    #[tokio::test]
+    async fn upload_requires_content_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(
+                Request::put("/")
+                    .body(Body::from("data"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["success"], false);
+        assert_eq!(data["error"]["code"], "CONTENT_LENGTH_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn upload_file_too_large() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(
+                Request::put("/?name=big.bin")
+                    .header("content-length", "99999999")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn upload_and_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let content = "download me";
+        let upload_resp = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=hello.txt")
+                    .header("content-length", content.len().to_string())
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload_resp.status(), StatusCode::CREATED);
+        let bytes = upload_resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        let raw_path = format!("/raw/{}/hello.txt", code);
+        let download_resp = test_app(state)
+            .oneshot(Request::get(&raw_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        let body = download_resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), content.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn upload_with_expiry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let body = "data";
+        let response = app
+            .oneshot(
+                Request::put("/?name=f.txt&expires=30m")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["success"], true);
+        assert!(data["expires_in_seconds"].as_i64().unwrap() <= 1800);
+        assert!(data["expires_in_seconds"].as_i64().unwrap() > 1700);
+    }
+
+    #[tokio::test]
+    async fn upload_plain_text_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let body = "data";
+        let response = app
+            .oneshot(
+                Request::put("/?name=f.txt")
+                    .header("content-length", body.len().to_string())
+                    .header("accept", "text/plain")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("/f.txt"));
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains('{'));
+    }
+
+    #[tokio::test]
+    async fn upload_named_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let body = "named";
+        let response = app
+            .oneshot(
+                Request::put("/myfile.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["filename"], "myfile.txt");
     }
 }
