@@ -30,6 +30,9 @@ class MockElement {
   querySelector(sel) {
     if (sel === 'span') return this.children.find((c) => c.tagName === 'span') || null;
     if (sel === '[data-result]') return null;
+    if (sel === 'button[type="submit"]') {
+      return this.children.find((c) => c.tagName === 'button' && c.type === 'submit') || null;
+    }
     return null;
   }
   getElementById(id) {
@@ -89,7 +92,10 @@ function makeDom() {
   const expirySelect = new MockElement('select', { id: 'expiry' });
   expirySelect.value = '';
 
+  const submitBtn = new MockElement('button', { id: 'submit-btn', type: 'submit' });
+  submitBtn.textContent = 'Upload';
   const uploadForm = new MockElement('form', { id: 'upload-form' });
+  uploadForm.children.push(submitBtn);
   const resultDiv = new MockElement('div', { id: 'result' });
 
   const elements = { 'upload-form': uploadForm, file: fileInput, 'drop-zone': dropZone, filename: filenameInput, expiry: expirySelect, result: resultDiv };
@@ -110,7 +116,7 @@ function makeDom() {
     execCommand() { return true; },
   };
 
-  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, resultDiv, spanEl };
+  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, resultDiv, spanEl, submitBtn };
 }
 
 function loadApp(dom) {
@@ -228,6 +234,32 @@ describe('drag and drop upload', () => {
     dom.uploadForm.dispatchEvent(makeEvent('submit'));
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(ctx.getLastFetch(), null);
+  });
+
+  it('rejects files exceeding max size', async () => {
+    const bigFile = { name: 'huge.bin', size: 300 * 1024 * 1024 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [bigFile] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx.getLastFetch(), null);
+    assert.ok(dom.resultDiv.innerHTML.includes('too large'));
+  });
+
+  it('disables submit button during upload', async () => {
+    const file = { name: 'f.txt', size: 10 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    // Button should be disabled immediately
+    assert.equal(dom.submitBtn.disabled, true);
+    assert.equal(dom.submitBtn.textContent, 'Uploading...');
+    await new Promise((r) => setTimeout(r, 10));
+    // Button should be re-enabled after upload completes
+    assert.equal(dom.submitBtn.disabled, false);
+    assert.equal(dom.submitBtn.textContent, 'Upload');
   });
 
   it('includes expiry in upload request', async () => {

@@ -102,6 +102,17 @@ JavaScript (frontend drag-and-drop tests):
 node --test static/app.test.js
 ```
 
+Playwright (end-to-end browser tests):
+
+```bash
+cd tests/e2e
+npm install
+npx playwright install chromium
+npx playwright test
+```
+
+The Playwright tests will automatically start the Rust server. Set `DATA_DIR` to a temp directory to avoid polluting your local data.
+
 ## Behavior notes
 
 - Expiry is clamped to a minimum of 5 minutes and a maximum of 7 days.
