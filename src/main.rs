@@ -206,9 +206,10 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         default_expiry = max_expiry;
     }
 
-    let brand_title = env::var("BRAND_TITLE").unwrap_or_else(|_| "DKSend".to_string());
-    let brand_description = env::var("BRAND_DESCRIPTION")
-        .unwrap_or_else(|_| "Drop a file, get a link. No accounts, no fuss.".to_string());
+    // Default heading is generic; operators can override via BRAND_TITLE
+    let brand_title = env::var("BRAND_TITLE").unwrap_or_else(|_| "Send Files".to_string());
+    // Tagline is empty by default; set BRAND_DESCRIPTION to add one
+    let brand_description = env::var("BRAND_DESCRIPTION").unwrap_or_default();
 
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
