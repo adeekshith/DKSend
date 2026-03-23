@@ -10,7 +10,6 @@
     <main class="shell">
       <header class="hero">
         <h1>{{title}}</h1>
-        <p>{{description}}</p>
       </header>
       <section class="card">
         <form id="upload-form">
@@ -26,10 +25,10 @@
             <label>
               Expiry
               <select id="expiry">
-                <option value="">24h (default)</option>
+                <!-- 1d is the default expiry; 24h is a duplicate and removed -->
+                <option value="">1d (default)</option>
                 <option value="30m">30m</option>
                 <option value="1h">1h</option>
-                <option value="1d">1d</option>
                 <option value="7d">7d</option>
               </select>
             </label>
@@ -41,7 +40,8 @@
       <section class="notes">
         <div>
           <h2>CLI quickstart</h2>
-          <pre>curl --upload-file ./hello.txt https://dksend.com</pre>
+          <!-- {{site_url}} is replaced server-side with the actual request origin -->
+          <pre>curl --upload-file ./hello.txt {{site_url}}</pre>
         </div>
         <div>
           <h2>Raw downloads</h2>

@@ -1,0 +1,16 @@
+# Runs Rust unit/integration tests and JS unit tests.
+# Build and run:
+#   docker build -f Dockerfile.test -t dksend-unit-tests .
+#   docker run --rm dksend-unit-tests
+FROM rust:1.92-alpine
+
+RUN apk add --no-cache musl-dev build-base nodejs
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY static ./static
+COPY migrations ./migrations
+
+RUN cargo test
+RUN node --test static/app.test.js
