@@ -1,0 +1,15 @@
+# Run all tests in Docker:
+#   docker compose -f docker-compose.test.yml up --build --exit-code-from unit-tests
+#   docker compose -f docker-compose.test.yml up --build --exit-code-from e2e-tests
+#   docker compose -f docker-compose.test.yml up --build   # run both
+
+services:
+  unit-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+
+  e2e-tests:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile

@@ -34,10 +34,10 @@ Environment variables:
 
 - `DATA_DIR` (default: `./data`) - storage path for database + files
 - `MAX_FILE_SIZE` in bytes (default: 209715200)
-- `DEFAULT_EXPIRY` (default: `24h`)
+- `DEFAULT_EXPIRY` (default: `1d`)
 - `MAX_EXPIRY` (default: `7d`)
-- `BRAND_TITLE` (default: `DKSend`) - HTML title and header text
-- `BRAND_DESCRIPTION` (default: `Drop a file, get a link. No accounts, no fuss.`)
+- `BRAND_TITLE` (default: `Send Files`) - HTML title and header text
+- `BRAND_DESCRIPTION` (default: empty) - optional tagline shown below the heading
 
 Durations use `30m`, `1h`, `2d`.
 
@@ -90,13 +90,37 @@ docker run --rm -p 3000:3000 -v $(pwd)/data:/data \\
 
 ## Testing
 
+### In Docker (recommended)
+
+Unit tests (Rust + JS):
+
+```bash
+docker build -f Dockerfile.test -t dksend-unit-tests .
+docker run --rm dksend-unit-tests
+```
+
+Playwright end-to-end tests:
+
+```bash
+docker build -f tests/e2e/Dockerfile -t dksend-e2e .
+docker run --rm dksend-e2e
+```
+
+Run both with Docker Compose:
+
+```bash
+docker compose -f docker-compose.test.yml up --build
+```
+
+### Locally
+
 Rust (backend + integration tests):
 
 ```bash
 cargo test
 ```
 
-JavaScript (frontend drag-and-drop tests):
+JavaScript (frontend unit tests):
 
 ```bash
 node --test static/app.test.js
@@ -111,7 +135,11 @@ npx playwright install chromium
 npx playwright test
 ```
 
-The Playwright tests will automatically start the Rust server. Set `DATA_DIR` to a temp directory to avoid polluting your local data.
+The Playwright tests automatically start the Rust server via `cargo run`. Set `DATA_DIR` to a temp directory to avoid polluting local data:
+
+```bash
+DATA_DIR=/tmp/dksend-test cd tests/e2e && npx playwright test
+```
 
 ## Behavior notes
 

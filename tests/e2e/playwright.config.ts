@@ -10,7 +10,8 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   webServer: {
-    command: 'cargo run',
+    // Use a pre-built binary (SERVER_BIN) when available, e.g. in Docker
+    command: process.env.SERVER_BIN ? process.env.SERVER_BIN : 'cargo run',
     cwd: '../..',
     url: 'http://localhost:3000',
     reuseExistingServer: !process.env.CI,
