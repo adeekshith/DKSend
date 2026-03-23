@@ -434,8 +434,10 @@ async fn handle_upload(
     }
 }
 
-async fn upload_page(State(state): State<AppState>) -> Html<String> {
-    Html(render_upload_page(&state.templates, &state.config))
+async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
+    // Pass base_url so the CLI quickstart snippet shows the actual server URL
+    let base_url = base_url_from_headers(&headers);
+    Html(render_upload_page(&state.templates, &state.config, &base_url))
 }
 
 async fn download_page_code(
@@ -846,14 +848,16 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
     output
 }
 
-fn render_upload_page(templates: &Templates, config: &AppConfig) -> String {
+fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
+    // site_url is injected so the CLI quickstart shows the actual server URL
     render_template(
         &templates.upload,
         &[
             ("{{title}}", title),
             ("{{description}}", description),
+            ("{{site_url}}", base_url.to_string()),
         ],
     )
 }
@@ -1083,7 +1087,7 @@ mod tests {
             brand_title: "Test".to_string(),
             brand_description: "Test".to_string(),
         };
-        let html = render_upload_page(&templates, &config);
+        let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(
             !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
             "file input must not have the required attribute (breaks drag-and-drop)"
