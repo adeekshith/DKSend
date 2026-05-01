@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
 use std::env;
@@ -55,6 +56,7 @@ struct UploadResponse {
     code: String,
     filename: String,
     size_bytes: u64,
+    sha256: String,
     expires_at: String,
     expires_in_seconds: i64,
     download_page_url: String,
@@ -88,6 +90,7 @@ struct UploadRecord {
     original_filename: String,
     stored_path: String,
     size_bytes: u64,
+    sha256_hex: String,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -351,6 +354,7 @@ async fn handle_upload(
     };
 
     let mut size_written: u64 = 0;
+    let mut hasher = Sha256::new();
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
@@ -384,19 +388,22 @@ async fn handle_upload(
                 "Could not store the uploaded file.",
             );
         }
+        hasher.update(&chunk);
     }
 
+    let sha256_hex = format!("{:x}", hasher.finalize());
     let now = Utc::now();
     let expires_at = now + ChronoDuration::from_std(expiry).unwrap_or_else(|_| ChronoDuration::seconds(0));
     let stored_path = file_path.to_string_lossy().to_string();
 
     if let Err(_) = sqlx::query(
-        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&code)
     .bind(&filename)
     .bind(&stored_path)
     .bind(size_written as i64)
+    .bind(&sha256_hex)
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
     .execute(&state.pool)
@@ -421,6 +428,7 @@ async fn handle_upload(
         code,
         filename,
         size_bytes: size_written,
+        sha256: sha256_hex.clone(),
         expires_at: expires_at.to_rfc3339(),
         expires_in_seconds: (expires_at - now).num_seconds(),
         download_page_url: download_page_url.clone(),
@@ -430,7 +438,11 @@ async fn handle_upload(
 
     match response_mode {
         UploadResponseMode::Json => json_response(StatusCode::CREATED, &response),
-        UploadResponseMode::Plain => (StatusCode::CREATED, format!("{download_page_url}\n")).into_response(),
+        UploadResponseMode::Plain => (
+            StatusCode::CREATED,
+            format!("{download_page_url}\nsha256:{sha256_hex}\n"),
+        )
+            .into_response(),
     }
 }
 
@@ -558,7 +570,7 @@ async fn raw_download(state: AppState, code: String) -> Response {
 
 async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
     let row = sqlx::query(
-        "SELECT code, original_filename, stored_path, size_bytes, created_at, expires_at FROM uploads WHERE code = ?",
+        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at FROM uploads WHERE code = ?",
     )
     .bind(code)
     .fetch_optional(pool)
@@ -576,6 +588,7 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
         original_filename: row.try_get("original_filename")?,
         stored_path: row.try_get("stored_path")?,
         size_bytes: row.try_get::<i64, _>("size_bytes")? as u64,
+        sha256_hex: row.try_get("sha256_hex")?,
         created_at: parse_datetime(&created_at)?,
         expires_at: parse_datetime(&expires_at)?,
     };
@@ -877,6 +890,14 @@ fn render_download_page(
     let expires_in = format_duration(record.expires_at - Utc::now());
     let created_at = record.created_at.to_rfc3339();
     let size = human_size(record.size_bytes);
+    let sha256_block = if record.sha256_hex.is_empty() {
+        String::new()
+    } else {
+        let hex = &record.sha256_hex;
+        format!(
+            r#"<div class="link-row hash-row"><span class="hash-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
+        )
+    };
 
     render_template(
         &templates.download,
@@ -890,6 +911,7 @@ fn render_download_page(
             ("{{download_url}}", download_url.clone()),
             ("{{download_page_url}}", download_page_url),
             ("{{curl_url}}", download_url),
+            ("{{sha256_block}}", sha256_block),
         ],
     )
 }
@@ -1140,6 +1162,76 @@ mod tests {
         assert!(data["code"].as_str().unwrap().len() >= 3);
         assert!(data["download_page_url"].as_str().unwrap().contains("test.txt"));
         assert!(data["raw_download_url"].as_str().unwrap().contains("/raw/"));
+        assert_eq!(
+            data["sha256"],
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_plain_response_appends_sha256() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let body = "hello world";
+        let response = app
+            .oneshot(
+                Request::put("/?name=plain.txt&output=plain")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let lines: Vec<&str> = text.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 2, "expected URL and sha256 lines, got: {text:?}");
+        assert!(lines[0].contains("plain.txt"));
+        assert_eq!(
+            lines[1],
+            "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_page_shows_sha256() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let body = "hello world";
+        let upload_resp = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=hashed.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = upload_resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        let page_resp = test_app(state)
+            .oneshot(
+                Request::get(format!("/{code}/hashed.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_resp.status(), StatusCode::OK);
+        let html_bytes = page_resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(html_bytes.to_vec()).unwrap();
+        assert!(
+            html.contains("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"),
+            "download page should display the sha256 hex"
+        );
+        assert!(html.contains("SHA-256"), "download page should label the hash row");
     }
 
     #[tokio::test]

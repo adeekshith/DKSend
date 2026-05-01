@@ -149,6 +149,9 @@ if (uploadForm) {
       }
       const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
       if (result) {
+        const hashRow = data.sha256
+          ? `<div class="link-row hash-row"><span class="hash-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
+          : '';
         result.innerHTML = `
           <h3>Uploaded</h3>
           <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
@@ -165,6 +168,7 @@ if (uploadForm) {
               <input type="text" readonly value="${data.raw_download_url}">
               <button type="button" data-copy="${data.raw_download_url}">Copy</button>
             </div>
+            ${hashRow}
           </div>
         `;
       }

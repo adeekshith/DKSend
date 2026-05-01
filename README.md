@@ -21,11 +21,26 @@ curl -H "Accept: text/plain" --upload-file ./hello.txt http://localhost:3000/hel
 curl --upload-file ./hello.txt "http://localhost:3000/hello.txt?output=plain"
 ```
 
-Responses are JSON (pretty-printed) by default. Use `Accept: text/plain` or `output=plain` for a bare share URL.
+Responses are JSON (pretty-printed) by default. Use `Accept: text/plain` or `output=plain` for the share URL followed by `sha256:<hex>` on the next line.
+
+The JSON response includes a `sha256` field with the hex-encoded SHA-256 digest of the uploaded bytes:
+
+```json
+{
+  "success": true,
+  "code": "abc12",
+  "filename": "hello.txt",
+  "size_bytes": 12,
+  "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+  "expires_at": "...",
+  "download_page_url": "...",
+  "raw_download_url": "..."
+}
+```
 
 ## Download
 
-- Web page: `GET /{code}/{filename}`
+- Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
 - Raw file: `GET /raw/{code}/{filename}`
 
 ## Configuration
