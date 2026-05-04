@@ -205,12 +205,14 @@ button:hover,
   white-space: nowrap;
 }
 
-.hash-row .hash-label {
+.row-label {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--muted, #666);
   white-space: nowrap;
+  min-width: 64px;
+  text-align: right;
 }
 
 .hash-row input {
@@ -316,5 +318,10 @@ button:hover,
   .link-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .row-label {
+    min-width: 0;
+    text-align: left;
   }
 }

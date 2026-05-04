@@ -895,7 +895,7 @@ fn render_download_page(
     } else {
         let hex = &record.sha256_hex;
         format!(
-            r#"<div class="link-row hash-row"><span class="hash-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
+            r#"<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
         )
     };
 
@@ -1255,6 +1255,8 @@ mod tests {
             "download page should display the sha256 hex"
         );
         assert!(html.contains("SHA-256"), "download page should label the hash row");
+        assert!(html.contains(">Page<"), "download page should label the page URL row");
+        assert!(html.contains(">Raw<"), "download page should label the raw URL row");
     }
 
     #[tokio::test]
