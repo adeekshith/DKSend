@@ -1134,6 +1134,11 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("drop-zone"));
         assert!(html.contains("upload-form"));
+        assert!(html.contains("CLI quickstart"));
+        assert!(
+            !html.contains("Raw downloads"),
+            "Raw downloads docs section should be removed from the upload page"
+        );
     }
 
     #[tokio::test]

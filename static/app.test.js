@@ -292,4 +292,10 @@ describe('upload.html template', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="upload-form"'));
   });
+
+  it('keeps the CLI quickstart docs and drops the Raw downloads blurb', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
+    assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
+  });
 });

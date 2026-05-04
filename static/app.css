@@ -220,9 +220,15 @@ button:hover,
 
 .notes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
+  justify-items: center;
   gap: 20px;
   text-align: center;
+}
+
+.notes > div {
+  width: 100%;
+  max-width: 480px;
 }
 
 .notes h2 {
