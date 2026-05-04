@@ -420,7 +420,7 @@ async fn handle_upload(
 
     let base_url = base_url_from_headers(&headers);
     let encoded_filename = urlencoding::encode(&filename);
-    let download_page_url = format!("{base_url}/{code}/{encoded_filename}");
+    let download_page_url = format!("{base_url}/{code}");
     let raw_download_url = format!("{base_url}/raw/{code}/{encoded_filename}");
 
     let response = UploadResponse {
@@ -886,7 +886,7 @@ fn render_download_page(
     let filename = escape_html(&record.original_filename);
     let encoded = urlencoding::encode(&record.original_filename);
     let download_url = format!("{base_url}/raw/{}/{}", record.code, encoded);
-    let download_page_url = format!("{base_url}/{}/{}", record.code, encoded);
+    let download_page_url = format!("{base_url}/{}", record.code);
     let expires_in = format_duration(record.expires_at - Utc::now());
     let created_at = record.created_at.to_rfc3339();
     let size = human_size(record.size_bytes);
@@ -1160,8 +1160,22 @@ mod tests {
         assert_eq!(data["filename"], "test.txt");
         assert_eq!(data["size_bytes"], body.len());
         assert!(data["code"].as_str().unwrap().len() >= 3);
-        assert!(data["download_page_url"].as_str().unwrap().contains("test.txt"));
-        assert!(data["raw_download_url"].as_str().unwrap().contains("/raw/"));
+        let code = data["code"].as_str().unwrap();
+        let page_url = data["download_page_url"].as_str().unwrap();
+        let raw_url = data["raw_download_url"].as_str().unwrap();
+        assert!(
+            page_url.ends_with(&format!("/{code}")),
+            "page url should be /<code> only, got {page_url}"
+        );
+        assert!(
+            !page_url.contains("test.txt"),
+            "page url should not contain the filename, got {page_url}"
+        );
+        assert!(raw_url.contains("/raw/"));
+        assert!(
+            raw_url.ends_with("/test.txt"),
+            "raw url should keep the filename, got {raw_url}"
+        );
         assert_eq!(
             data["sha256"],
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -1190,7 +1204,11 @@ mod tests {
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 2, "expected URL and sha256 lines, got: {text:?}");
-        assert!(lines[0].contains("plain.txt"));
+        assert!(
+            lines[0].starts_with("http") && !lines[0].contains("plain.txt"),
+            "page URL line should be the bare /<code> form, got {:?}",
+            lines[0]
+        );
         assert_eq!(
             lines[1],
             "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -1373,7 +1391,15 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(text.contains("/f.txt"));
+        assert!(
+            !text.contains("/f.txt"),
+            "page url in plain response should not contain filename, got {text:?}"
+        );
+        let first_line = text.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("http"),
+            "first line should be the page URL, got {first_line:?}"
+        );
         assert!(text.ends_with('\n'));
         assert!(!text.contains('{'));
     }

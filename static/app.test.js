@@ -133,7 +133,7 @@ function loadApp(dom) {
         code: 'abc',
         filename: 'test.txt',
         size_bytes: 100,
-        download_page_url: 'http://localhost/abc/test.txt',
+        download_page_url: 'http://localhost/abc',
         raw_download_url: 'http://localhost/raw/abc/test.txt',
       }),
     };
