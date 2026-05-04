@@ -133,8 +133,9 @@ function loadApp(dom) {
         code: 'abc',
         filename: 'test.txt',
         size_bytes: 100,
-        download_page_url: 'http://localhost/abc/test.txt',
+        download_page_url: 'http://localhost/abc',
         raw_download_url: 'http://localhost/raw/abc/test.txt',
+        sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
       }),
     };
   };
@@ -262,6 +263,22 @@ describe('drag and drop upload', () => {
     assert.equal(dom.submitBtn.textContent, 'Upload');
   });
 
+  it('renders Page, Raw, and SHA-256 labels in the result block', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(html.includes('>Page<'), 'should label the page URL row');
+    assert.ok(html.includes('>Raw<'), 'should label the raw URL row');
+    assert.ok(html.includes('>SHA-256<'), 'should label the sha256 row');
+    // All three labels share the same row-label class so they align horizontally
+    const labelMatches = html.match(/class="row-label"/g) || [];
+    assert.equal(labelMatches.length, 3, 'expected three row-label spans');
+  });
+
   it('includes expiry in upload request', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -291,5 +308,11 @@ describe('upload.html template', () => {
   it('has upload form', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="upload-form"'));
+  });
+
+  it('keeps the CLI quickstart docs and drops the Raw downloads blurb', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
+    assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
   });
 });

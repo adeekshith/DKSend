@@ -31,13 +31,20 @@ test.describe('upload and download flow', () => {
     const downloadLink = page.locator('[data-result] a').first();
     const href = await downloadLink.getAttribute('href');
     expect(href).toBeTruthy();
+    // Page URL should be the short /<code> form (no filename)
+    expect(href!).not.toContain('hello.txt');
+
+    // Get the raw URL directly from the second copy input in the result block
+    const inputs = page.locator('[data-result] .link-row input');
+    const rawLink = await inputs.nth(1).inputValue();
+    expect(rawLink).toContain('/raw/');
+    expect(rawLink.endsWith('/hello.txt')).toBe(true);
 
     // Visit download page
     await page.goto(href!);
     await expect(page.locator('body')).toContainText('hello.txt');
 
     // Download raw file and verify contents
-    const rawLink = href!.replace(/\/([^/]+)\/([^/]+)$/, '/raw/$1/$2');
     const response = await page.request.get(rawLink);
     expect(response.status()).toBe(200);
     const body = await response.text();
