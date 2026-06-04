@@ -53,6 +53,26 @@ if (uploadForm) {
   const expirySelect = document.getElementById('expiry');
   let droppedFile = null;
   const dropLabel = dropZone?.querySelector('span');
+  const DEFAULT_DROP_LABEL = dropLabel?.textContent || 'Drag & drop or click to choose a file';
+
+  const resetUploadForm = () => {
+    uploadForm.reset();
+    droppedFile = null;
+    if (dropLabel) {
+      dropLabel.textContent = DEFAULT_DROP_LABEL;
+    }
+    if (result) {
+      result.classList.add('hidden');
+      result.innerHTML = '';
+    }
+    uploadForm.classList.remove('hidden');
+  };
+
+  document.addEventListener('click', (event) => {
+    if (event.target.closest('[data-reset]')) {
+      resetUploadForm();
+    }
+  });
 
   const setDragging = (active) => {
     if (dropZone) {
@@ -157,7 +177,8 @@ if (uploadForm) {
           <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
           ${warning}
           <div class="result-actions">
-            <a href="${data.download_page_url}">Open download page</a>
+            <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
+            <button type="button" data-reset>Upload another file</button>
           </div>
           <div class="link-list">
             <div class="link-row">
@@ -174,6 +195,7 @@ if (uploadForm) {
           </div>
         `;
       }
+      uploadForm.classList.add('hidden');
     } catch (err) {
       if (result) {
         result.innerHTML = `<p class="warn">${err.message}</p>`;
