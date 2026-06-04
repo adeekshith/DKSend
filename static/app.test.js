@@ -49,6 +49,10 @@ class MockElement {
   remove() {}
   focus() {}
   select() {}
+  reset() {
+    this.value = '';
+    this.files = [];
+  }
   createElement(tag) {
     return new MockElement(tag);
   }
@@ -277,6 +281,62 @@ describe('drag and drop upload', () => {
     // All three labels share the same row-label class so they align horizontally
     const labelMatches = html.match(/class="row-label"/g) || [];
     assert.equal(labelMatches.length, 3, 'expected three row-label spans');
+  });
+
+  it('opens the download page link in a new tab', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(html.includes('target="_blank"'), 'download link should open in a new tab');
+    assert.ok(html.includes('rel="noopener"'), 'download link should set rel=noopener');
+  });
+
+  it('hides the upload form after a successful upload', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    assert.ok(!dom.uploadForm.classList.contains('hidden'), 'form is visible before upload');
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom.uploadForm.classList.contains('hidden'), 'form is hidden after upload');
+  });
+
+  it('renders an "Upload another file" button in the result block', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom.resultDiv.innerHTML.includes('data-reset'), 'result should contain a reset button');
+  });
+
+  it('restores the form when "Upload another file" is clicked', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom.uploadForm.classList.contains('hidden'));
+
+    // Simulate clicking the [data-reset] button (delegated on document)
+    const resetEvent = makeEvent('click', {
+      target: { closest: (sel) => (sel === '[data-reset]' ? {} : null) },
+    });
+    for (const handler of dom.document._listeners.click || []) {
+      await handler(resetEvent);
+    }
+
+    assert.ok(!dom.uploadForm.classList.contains('hidden'), 'form is visible again');
+    assert.ok(dom.resultDiv.classList.contains('hidden'), 'result is hidden');
+    assert.equal(dom.resultDiv.innerHTML, '', 'result is cleared');
+    assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file', 'drop label restored');
   });
 
   it('includes expiry in upload request', async () => {

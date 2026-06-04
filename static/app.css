@@ -161,7 +161,8 @@ button:hover,
   border: 1px solid var(--stroke);
 }
 
-.result.hidden {
+.result.hidden,
+.hidden {
   display: none;
 }
 
@@ -174,13 +175,36 @@ button:hover,
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  margin-top: 12px;
+  margin-top: 16px;
+  justify-content: center;
+  align-items: center;
 }
 
+/* Both actions share the same secondary/outline style and one baseline:
+   reset the default button top margin and give the anchor matching button
+   geometry so the row stays aligned. */
+.result-actions a,
 .result-actions button {
+  margin-top: 0;
+  padding: 12px 18px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
   background: var(--card);
   border: 1px solid var(--stroke);
   color: var(--ink);
+}
+
+.result-actions a:hover,
+.result-actions button:hover {
+  background: var(--card);
+  border-color: var(--accent);
+  color: var(--accent-dark);
 }
 
 .link-list {
