@@ -90,7 +90,7 @@ Durations use `30m`, `1h`, `2d`.
 
 ## Health check
 
-`GET /healthz` returns `{"status":"ok"}` with HTTP 200 when the server and its database are reachable (503 otherwise). The Docker image ships a `HEALTHCHECK` that polls it. The server also shuts down cleanly on SIGTERM/SIGINT, finishing in-flight requests, so `docker stop` is fast.
+`GET /healthz` returns `{"status":"ok"}` with HTTP 200 when the server and its database are reachable (503 otherwise). The Docker image deliberately ships no built-in `HEALTHCHECK` — the periodic check process keeps page-cache pages active, which inflates `docker stats` by a few MB. Opt in by uncommenting the `healthcheck` block in [docker-compose.yml](docker-compose.yml) or pointing your monitoring at `/healthz`. The server also shuts down cleanly on SIGTERM/SIGINT, finishing in-flight requests, so `docker stop` is fast.
 
 ## Docker / Podman
 

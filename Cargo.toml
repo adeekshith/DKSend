@@ -22,3 +22,11 @@ urlencoding = "2"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+
+# Smaller binary (= smaller resident page cache) at no runtime cost.
+# opt-level stays at the default 3 and unwinding stays on so a panicking
+# request can't take down the server.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
