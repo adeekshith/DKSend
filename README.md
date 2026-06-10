@@ -34,9 +34,13 @@ The JSON response includes a `sha256` field with the hex-encoded SHA-256 digest 
   "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
   "expires_at": "...",
   "download_page_url": "...",
-  "raw_download_url": "..."
+  "raw_download_url": "...",
+  "delete_token": "...",
+  "delete_url": "..."
 }
 ```
+
+Plain responses add a third `delete:<url>` line after the share URL and `sha256:` lines.
 
 ## Authentication
 
@@ -53,6 +57,15 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 
 - Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
 - Raw file: `GET /raw/{code}/{filename}`
+
+## Delete
+
+Every upload gets its own secret delete token, returned as `delete_token`/`delete_url` and shown in the web UI. Either:
+
+- Open the `delete_url` in a browser and confirm on the page, or
+- `curl -X DELETE "http://localhost:3000/{code}?token=<delete_token>"`
+
+Deleting removes the file and its metadata immediately. A second delete returns 404. Uploads created before this feature have no delete token and can only expire.
 
 ## Configuration
 

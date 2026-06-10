@@ -179,6 +179,9 @@ if (uploadForm) {
         const hashRow = data.sha256
           ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
           : '';
+        const deleteRow = data.delete_url
+          ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
+          : '';
         result.innerHTML = `
           <h3>Uploaded</h3>
           <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
@@ -199,6 +202,7 @@ if (uploadForm) {
               <button type="button" data-copy="${data.raw_download_url}">Copy</button>
             </div>
             ${hashRow}
+            ${deleteRow}
           </div>
         `;
       }

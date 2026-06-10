@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{title}}</title>
+    <link rel="stylesheet" href="/static/app.css?v=6">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <h1>{{title}}</h1>
+      </header>
+      <section class="card">
+        <div class="file-meta">
+          <h2>{{filename}}</h2>
+          <p>{{size}}</p>
+          <p class="expiry">Deleting this file cannot be undone.</p>
+        </div>
+        <form method="post" action="/delete/{{code}}">
+          <input type="hidden" name="token" value="{{token}}">
+          <div class="actions">
+            <button type="submit">Delete file</button>
+            <a href="/{{code}}">Cancel</a>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

@@ -129,6 +129,7 @@ struct Templates {
     upload: String,
     download: String,
     error: String,
+    delete: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,6 +143,8 @@ struct UploadResponse {
     expires_in_seconds: i64,
     download_page_url: String,
     raw_download_url: String,
+    delete_token: String,
+    delete_url: String,
     warning: Option<String>,
 }
 
@@ -174,6 +177,23 @@ struct UploadRecord {
     sha256_hex: String,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    delete_token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteQuery {
+    token: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteForm {
+    token: String,
+}
+
+enum DeleteOutcome {
+    NotFound,
+    Forbidden,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,7 +307,13 @@ fn build_router(state: AppState) -> Router {
         .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
-        .route("/:code", get(download_page_code).put(upload_handler_named))
+        .route("/delete/:code", get(delete_confirm_page).post(delete_form_action))
+        .route(
+            "/:code",
+            get(download_page_code)
+                .put(upload_handler_named)
+                .delete(delete_api),
+        )
         .route("/:code/:filename", get(download_page_named))
         .with_state(state)
 }
@@ -296,10 +322,12 @@ async fn load_templates() -> Result<Templates, anyhow::Error> {
     let upload = fs::read_to_string("static/upload.html").await?;
     let download = fs::read_to_string("static/download.html").await?;
     let error = fs::read_to_string("static/error.html").await?;
+    let delete = fs::read_to_string("static/delete.html").await?;
     Ok(Templates {
         upload,
         download,
         error,
+        delete,
     })
 }
 
@@ -646,9 +674,10 @@ async fn handle_upload(
     let now = Utc::now();
     let expires_at = now + ChronoDuration::from_std(expiry).unwrap_or_else(|_| ChronoDuration::seconds(0));
     let stored_path = file_path.to_string_lossy().to_string();
+    let delete_token = generate_delete_token();
 
     if let Err(_) = sqlx::query(
-        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&code)
     .bind(&filename)
@@ -657,6 +686,7 @@ async fn handle_upload(
     .bind(&sha256_hex)
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
+    .bind(&delete_token)
     .execute(&state.pool)
     .await
     {
@@ -673,6 +703,7 @@ async fn handle_upload(
     let encoded_filename = urlencoding::encode(&filename);
     let download_page_url = format!("{base_url}/{code}");
     let raw_download_url = format!("{base_url}/raw/{code}/{encoded_filename}");
+    let delete_url = format!("{base_url}/delete/{code}?token={delete_token}");
 
     let response = UploadResponse {
         success: true,
@@ -684,6 +715,8 @@ async fn handle_upload(
         expires_in_seconds: (expires_at - now).num_seconds(),
         download_page_url: download_page_url.clone(),
         raw_download_url,
+        delete_token,
+        delete_url: delete_url.clone(),
         warning,
     };
 
@@ -691,7 +724,7 @@ async fn handle_upload(
         UploadResponseMode::Json => json_response(StatusCode::CREATED, &response),
         UploadResponseMode::Plain => (
             StatusCode::CREATED,
-            format!("{download_page_url}\nsha256:{sha256_hex}\n"),
+            format!("{download_page_url}\nsha256:{sha256_hex}\ndelete:{delete_url}\n"),
         )
             .into_response(),
     }
@@ -870,9 +903,144 @@ async fn raw_download(
     response
 }
 
+fn generate_delete_token() -> String {
+    // 62^32 possibilities: long enough that no uniqueness check is needed
+    rand::thread_rng()
+        .sample_iter(Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
+async fn perform_delete(
+    state: &AppState,
+    code: &str,
+    token: &str,
+) -> Result<DeleteOutcome, anyhow::Error> {
+    let Some(record) = fetch_upload(&state.pool, code).await? else {
+        return Ok(DeleteOutcome::NotFound);
+    };
+    // Rows from before the delete-token migration store an empty token and
+    // must stay undeletable; without this check an empty token would match.
+    if record.delete_token.is_empty()
+        || !constant_time_eq(token.as_bytes(), record.delete_token.as_bytes())
+    {
+        return Ok(DeleteOutcome::Forbidden);
+    }
+    // DB row first, then the file — same order and reasoning as cleanup_loop
+    sqlx::query("DELETE FROM uploads WHERE code = ?")
+        .bind(code)
+        .execute(&state.pool)
+        .await?;
+    let _ = fs::remove_file(&record.stored_path).await;
+    Ok(DeleteOutcome::Deleted)
+}
+
+async fn delete_api(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Query(params): Query<DeleteQuery>,
+) -> Response {
+    let token = params.token.unwrap_or_default();
+    match perform_delete(&state, &code, &token).await {
+        Ok(DeleteOutcome::Deleted) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "success": true, "code": code }),
+        ),
+        Ok(DeleteOutcome::NotFound) => json_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "File not found or already deleted.",
+        ),
+        Ok(DeleteOutcome::Forbidden) => json_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Invalid delete token.",
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SERVER_ERROR",
+            "Could not delete the file.",
+        ),
+    }
+}
+
+async fn delete_confirm_page(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Query(params): Query<DeleteQuery>,
+) -> Response {
+    let token = params.token.unwrap_or_default();
+    let record = match fetch_upload(&state.pool, &code).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return html_error(
+                StatusCode::NOT_FOUND,
+                "This file does not exist or was already deleted.",
+                &state.templates,
+                &state.config,
+            )
+        }
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong while loading this file.",
+                &state.templates,
+                &state.config,
+            )
+        }
+    };
+    // Validate before rendering; the page never deletes on GET so link
+    // prefetchers cannot remove files.
+    if record.delete_token.is_empty()
+        || !constant_time_eq(token.as_bytes(), record.delete_token.as_bytes())
+    {
+        return html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid delete link.",
+            &state.templates,
+            &state.config,
+        );
+    }
+    Html(render_delete_page(&record, &state.templates, &state.config)).into_response()
+}
+
+async fn delete_form_action(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    axum::Form(form): axum::Form<DeleteForm>,
+) -> Response {
+    match perform_delete(&state, &code, &form.token).await {
+        Ok(DeleteOutcome::Deleted) => html_error(
+            StatusCode::OK,
+            "File deleted.",
+            &state.templates,
+            &state.config,
+        ),
+        Ok(DeleteOutcome::NotFound) => html_error(
+            StatusCode::NOT_FOUND,
+            "This file does not exist or was already deleted.",
+            &state.templates,
+            &state.config,
+        ),
+        Ok(DeleteOutcome::Forbidden) => html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid delete token.",
+            &state.templates,
+            &state.config,
+        ),
+        Err(_) => html_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the file.",
+            &state.templates,
+            &state.config,
+        ),
+    }
+}
+
 async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
     let row = sqlx::query(
-        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at FROM uploads WHERE code = ?",
+        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token FROM uploads WHERE code = ?",
     )
     .bind(code)
     .fetch_optional(pool)
@@ -893,6 +1061,7 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
         sha256_hex: row.try_get("sha256_hex")?,
         created_at: parse_datetime(&created_at)?,
         expires_at: parse_datetime(&expires_at)?,
+        delete_token: row.try_get("delete_token")?,
     };
 
     Ok(Some(record))
@@ -1214,6 +1383,19 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
     )
 }
 
+fn render_delete_page(record: &UploadRecord, templates: &Templates, config: &AppConfig) -> String {
+    render_template(
+        &templates.delete,
+        &[
+            ("{{title}}", escape_html(&config.brand_title)),
+            ("{{filename}}", escape_html(&record.original_filename)),
+            ("{{size}}", human_size(record.size_bytes)),
+            ("{{code}}", record.code.clone()),
+            ("{{token}}", escape_html(&record.delete_token)),
+        ],
+    )
+}
+
 fn render_download_page(
     record: &UploadRecord,
     base_url: &str,
@@ -1440,6 +1622,7 @@ mod tests {
             upload: std::fs::read_to_string("static/upload.html").unwrap(),
             download: String::new(),
             error: String::new(),
+            delete: String::new(),
         };
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
@@ -1541,7 +1724,7 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
-        assert_eq!(lines.len(), 2, "expected URL and sha256 lines, got: {text:?}");
+        assert_eq!(lines.len(), 3, "expected URL, sha256, and delete lines, got: {text:?}");
         assert!(
             lines[0].starts_with("http") && !lines[0].contains("plain.txt"),
             "page URL line should be the bare /<code> form, got {:?}",
@@ -1550,6 +1733,11 @@ mod tests {
         assert_eq!(
             lines[1],
             "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert!(
+            lines[2].starts_with("delete:http") && lines[2].contains("/delete/"),
+            "third line should be the delete URL, got {:?}",
+            lines[2]
         );
     }
 
@@ -1843,6 +2031,245 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
+    async fn upload_for_delete(state: &AppState) -> (String, String) {
+        let body = "delete me";
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=victim.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (
+            data["code"].as_str().unwrap().to_string(),
+            data["delete_token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn upload_response_includes_delete_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let body = "hello";
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=f.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let token = data["delete_token"].as_str().unwrap();
+        assert_eq!(token.len(), 32);
+        let delete_url = data["delete_url"].as_str().unwrap();
+        let code = data["code"].as_str().unwrap();
+        assert!(delete_url.contains(&format!("/delete/{code}?token={token}")));
+    }
+
+    #[tokio::test]
+    async fn delete_with_valid_token_removes_file_and_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let file_path = state.config.data_dir.join("files").join(&code);
+        assert!(file_path.exists(), "file should exist before delete");
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::delete(format!("/{code}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!file_path.exists(), "file should be gone after delete");
+
+        let response = test_app(state)
+            .oneshot(Request::get(format!("/{code}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_with_wrong_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::delete(format!("/{code}?token=wrongwrongwrongwrongwrongwrong12"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // File is still downloadable
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/victim.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_without_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::delete(format!("/{code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_twice_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::delete(format!("/{code}?token={token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_rejected_for_legacy_empty_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        // Simulate a row created before the delete_token migration
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, '')",
+        )
+        .bind("legacy")
+        .bind("old.txt")
+        .bind("/tmp/none")
+        .bind(4i64)
+        .bind("")
+        .bind(now.to_rfc3339())
+        .bind((now + ChronoDuration::hours(1)).to_rfc3339())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        for token_query in ["", "?token="] {
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::delete(format!("/legacy{token_query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "empty stored token must never match"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_page_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/delete/{code}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("victim.txt"));
+        assert!(html.contains(&format!(r#"action="/delete/{code}""#)));
+        assert!(html.contains(r#"name="token""#));
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_page_wrong_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/delete/{code}?token=nope"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_form_post_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::post(format!("/delete/{code}"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("File deleted."));
+
+        let response = test_app(state)
+            .oneshot(Request::get(format!("/{code}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2068,6 +2495,7 @@ mod tests {
             upload: std::fs::read_to_string("static/upload.html").unwrap(),
             download: String::new(),
             error: String::new(),
+            delete: String::new(),
         };
         let mut config = test_config(PathBuf::from("./data"));
         config.upload_token = Some("s3cret".to_string());
@@ -2083,6 +2511,7 @@ mod tests {
             upload: std::fs::read_to_string("static/upload.html").unwrap(),
             download: String::new(),
             error: String::new(),
+            delete: String::new(),
         };
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
