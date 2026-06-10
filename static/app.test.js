@@ -95,6 +95,7 @@ function makeDom() {
   const filenameInput = new MockElement('input', { id: 'filename' });
   const expirySelect = new MockElement('select', { id: 'expiry' });
   expirySelect.value = '';
+  const tokenInput = new MockElement('input', { id: 'token', type: 'password' });
 
   const submitBtn = new MockElement('button', { id: 'submit-btn', type: 'submit' });
   submitBtn.textContent = 'Upload';
@@ -102,7 +103,7 @@ function makeDom() {
   uploadForm.children.push(submitBtn);
   const resultDiv = new MockElement('div', { id: 'result' });
 
-  const elements = { 'upload-form': uploadForm, file: fileInput, 'drop-zone': dropZone, filename: filenameInput, expiry: expirySelect, result: resultDiv };
+  const elements = { 'upload-form': uploadForm, file: fileInput, 'drop-zone': dropZone, filename: filenameInput, expiry: expirySelect, token: tokenInput, result: resultDiv };
 
   const document = {
     getElementById(id) { return elements[id] || null; },
@@ -120,7 +121,7 @@ function makeDom() {
     execCommand() { return true; },
   };
 
-  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, resultDiv, spanEl, submitBtn };
+  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, tokenInput, resultDiv, spanEl, submitBtn };
 }
 
 function loadApp(dom) {
@@ -140,6 +141,8 @@ function loadApp(dom) {
         download_page_url: 'http://localhost/abc',
         raw_download_url: 'http://localhost/raw/abc/test.txt',
         sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+        delete_token: 'tok123tok123tok123tok123tok12312',
+        delete_url: 'http://localhost/delete/abc?token=tok123tok123tok123tok123tok12312',
       }),
     };
   };
@@ -267,7 +270,7 @@ describe('drag and drop upload', () => {
     assert.equal(dom.submitBtn.textContent, 'Upload');
   });
 
-  it('renders Page, Raw, and SHA-256 labels in the result block', async () => {
+  it('renders Page, Raw, SHA-256, and Delete labels in the result block', async () => {
     const file = { name: 'doc.pdf', size: 2048 };
     dom.dropZone.dispatchEvent(
       makeEvent('drop', { dataTransfer: { files: [file] } }),
@@ -278,9 +281,24 @@ describe('drag and drop upload', () => {
     assert.ok(html.includes('>Page<'), 'should label the page URL row');
     assert.ok(html.includes('>Raw<'), 'should label the raw URL row');
     assert.ok(html.includes('>SHA-256<'), 'should label the sha256 row');
-    // All three labels share the same row-label class so they align horizontally
+    assert.ok(html.includes('>Delete<'), 'should label the delete URL row');
+    // All labels share the same row-label class so they align horizontally
     const labelMatches = html.match(/class="row-label"/g) || [];
-    assert.equal(labelMatches.length, 3, 'expected three row-label spans');
+    assert.equal(labelMatches.length, 4, 'expected four row-label spans');
+  });
+
+  it('renders the delete link with a copy button', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(
+      html.includes('data-copy="http://localhost/delete/abc?token='),
+      'delete URL should be copyable',
+    );
   });
 
   it('opens the download page link in a new tab', async () => {
@@ -337,6 +355,29 @@ describe('drag and drop upload', () => {
     assert.ok(dom.resultDiv.classList.contains('hidden'), 'result is hidden');
     assert.equal(dom.resultDiv.innerHTML, '', 'result is cleared');
     assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file', 'drop label restored');
+  });
+
+  it('sends Authorization header when the token field is filled', async () => {
+    const file = { name: 'f.txt', size: 10 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.tokenInput.value = 's3cret';
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [, opts] = ctx.getLastFetch();
+    assert.equal(opts.headers['Authorization'], 'Bearer s3cret');
+  });
+
+  it('sends no Authorization header when the token field is empty', async () => {
+    const file = { name: 'f.txt', size: 10 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [, opts] = ctx.getLastFetch();
+    assert.equal(opts.headers['Authorization'], undefined);
   });
 
   it('includes expiry in upload request', async () => {

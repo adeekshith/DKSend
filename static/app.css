@@ -111,6 +111,14 @@ body {
   margin-top: 20px;
 }
 
+.token-row {
+  grid-template-columns: 1fr;
+}
+
+#upload-form[data-auth-required="false"] .token-row {
+  display: none;
+}
+
 label {
   display: flex;
   flex-direction: column;

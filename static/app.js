@@ -51,6 +51,7 @@ if (uploadForm) {
   const fileInput = document.getElementById('file');
   const filenameInput = document.getElementById('filename');
   const expirySelect = document.getElementById('expiry');
+  const tokenInput = document.getElementById('token');
   let droppedFile = null;
   const dropLabel = dropZone?.querySelector('span');
   const DEFAULT_DROP_LABEL = dropLabel?.textContent || 'Drag & drop or click to choose a file';
@@ -161,8 +162,14 @@ if (uploadForm) {
       submitButton.textContent = 'Uploading...';
     }
 
+    const headers = {};
+    const token = (tokenInput?.value || '').trim();
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+
     try {
-      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file });
+      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file, headers });
       const data = await res.json();
       if (!data.success) {
         throw new Error(data.error?.message || 'Upload failed');
@@ -171,6 +178,9 @@ if (uploadForm) {
       if (result) {
         const hashRow = data.sha256
           ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
+          : '';
+        const deleteRow = data.delete_url
+          ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
           : '';
         result.innerHTML = `
           <h3>Uploaded</h3>
@@ -192,6 +202,7 @@ if (uploadForm) {
               <button type="button" data-copy="${data.raw_download_url}">Copy</button>
             </div>
             ${hashRow}
+            ${deleteRow}
           </div>
         `;
       }

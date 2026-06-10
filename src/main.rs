@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, get_service},
@@ -13,9 +13,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
+use std::collections::HashMap;
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -27,6 +30,8 @@ struct AppState {
     pool: Pool<Sqlite>,
     config: AppConfig,
     templates: Templates,
+    upload_limiter: Option<RateLimiter>,
+    lookup_limiter: Option<RateLimiter>,
 }
 
 #[derive(Clone)]
@@ -41,6 +46,82 @@ struct AppConfig {
     code_retries: usize,
     brand_title: String,
     brand_description: String,
+    upload_token: Option<String>,
+    max_total_storage: Option<u64>,
+    upload_rate_per_min: u32,
+    lookup_rate_per_min: u32,
+    host: String,
+    port: u16,
+    base_url: Option<String>,
+    cleanup_interval: Duration,
+}
+
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+// Per-IP token bucket. Good enough to slow upload spam and share-code
+// enumeration on a small instance; not a substitute for upstream protection.
+#[derive(Clone)]
+struct RateLimiter {
+    capacity: f64,
+    refill_per_sec: f64,
+    buckets: Arc<Mutex<HashMap<String, Bucket>>>,
+}
+
+impl RateLimiter {
+    fn new(per_min: u32) -> Option<RateLimiter> {
+        if per_min == 0 {
+            return None;
+        }
+        Some(RateLimiter {
+            capacity: per_min as f64,
+            refill_per_sec: per_min as f64 / 60.0,
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn allow(&self, key: &str) -> bool {
+        self.allow_at(key, Instant::now())
+    }
+
+    fn allow_at(&self, key: &str, now: Instant) -> bool {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        if buckets.len() > 10_000 {
+            // A fully refilled bucket behaves like a fresh one, so it can go
+            let capacity = self.capacity;
+            let refill = self.refill_per_sec;
+            buckets.retain(|_, bucket| {
+                let elapsed = now.duration_since(bucket.last).as_secs_f64();
+                bucket.tokens + elapsed * refill < capacity
+            });
+        }
+        let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
+            tokens: self.capacity,
+            last: now,
+        });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        bucket.last = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn client_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| addr.map(|value| value.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[derive(Clone)]
@@ -48,6 +129,7 @@ struct Templates {
     upload: String,
     download: String,
     error: String,
+    delete: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +143,8 @@ struct UploadResponse {
     expires_in_seconds: i64,
     download_page_url: String,
     raw_download_url: String,
+    delete_token: String,
+    delete_url: String,
     warning: Option<String>,
 }
 
@@ -93,6 +177,23 @@ struct UploadRecord {
     sha256_hex: String,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    delete_token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteQuery {
+    token: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeleteForm {
+    token: String,
+}
+
+enum DeleteOutcome {
+    NotFound,
+    Forbidden,
+    Deleted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,10 +241,59 @@ async fn run() -> Result<(), anyhow::Error> {
     let brand_title = config.brand_title.clone();
     let state = AppState {
         pool,
+        upload_limiter: RateLimiter::new(config.upload_rate_per_min),
+        lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
         config,
         templates,
     };
 
+    let app = build_router(state.clone());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        cleanup_loop(cleanup_state, shutdown_rx).await;
+    });
+
+    let listen_addr = format!("{}:{}", state.config.host, state.config.port);
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
+    println!("{} listening on http://{listen_addr}", brand_title);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+    let _ = shutdown_tx.send(true);
+
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    eprintln!("DKSend: shutdown signal received, finishing in-flight requests");
+}
+
+
+fn build_router(state: AppState) -> Router {
     let static_service = get_service(ServeDir::new("static")).layer(
         SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -151,37 +301,33 @@ async fn run() -> Result<(), anyhow::Error> {
         ),
     );
 
-    let app = Router::new()
+    Router::new()
         .route("/", get(upload_page).put(upload_handler))
+        .route("/healthz", get(healthz))
         .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
-        .route("/:code", get(download_page_code).put(upload_handler_named))
+        .route("/delete/:code", get(delete_confirm_page).post(delete_form_action))
+        .route(
+            "/:code",
+            get(download_page_code)
+                .put(upload_handler_named)
+                .delete(delete_api),
+        )
         .route("/:code/:filename", get(download_page_named))
-        .with_state(state.clone());
-
-    let cleanup_state = state.clone();
-    tokio::spawn(async move {
-        cleanup_loop(cleanup_state).await;
-    });
-
-    let listen_addr = "0.0.0.0:3000";
-    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    println!("{} listening on http://{listen_addr}", brand_title);
-    axum::serve(listener, app).await?;
-
-    Ok(())
+        .with_state(state)
 }
-
 
 async fn load_templates() -> Result<Templates, anyhow::Error> {
     let upload = fs::read_to_string("static/upload.html").await?;
     let download = fs::read_to_string("static/download.html").await?;
     let error = fs::read_to_string("static/error.html").await?;
+    let delete = fs::read_to_string("static/delete.html").await?;
     Ok(Templates {
         upload,
         download,
         error,
+        delete,
     })
 }
 
@@ -214,6 +360,47 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
     // Tagline is empty by default; set BRAND_DESCRIPTION to add one
     let brand_description = env::var("BRAND_DESCRIPTION").unwrap_or_default();
 
+    // Unset or empty UPLOAD_TOKEN leaves uploads open to anyone
+    let upload_token = env::var("UPLOAD_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    // Unset means unlimited total storage
+    let max_total_storage = env::var("MAX_TOTAL_STORAGE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+
+    // 0 disables the corresponding rate limiter
+    let upload_rate_per_min = env::var("RATE_LIMIT_UPLOADS_PER_MIN")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(20);
+    let lookup_rate_per_min = env::var("RATE_LIMIT_LOOKUPS_PER_MIN")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(60);
+
+    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(3000);
+
+    // When set, BASE_URL overrides Host-header-derived URLs (use behind
+    // a reverse proxy that doesn't forward the public host)
+    let base_url = env::var("BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+
+    let cleanup_interval = env::var("CLEANUP_INTERVAL")
+        .ok()
+        .and_then(|value| parse_duration(&value).ok())
+        .unwrap_or(Duration::from_secs(60 * 60))
+        .max(Duration::from_secs(60));
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -225,20 +412,58 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         code_retries: 5,
         brand_title,
         brand_description,
+        upload_token,
+        max_total_storage,
+        upload_rate_per_min,
+        lookup_rate_per_min,
+        host,
+        port,
+        base_url,
+        cleanup_interval,
     })
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
+    let Some(expected) = config.upload_token.as_deref() else {
+        return true;
+    };
+    let Some(provided) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
+                Some(trimmed[7..].trim())
+            } else {
+                None
+            }
+        })
+    else {
+        return false;
+    };
+    constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
 async fn upload_handler(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Query(params): Query<UploadQuery>,
     body: Body,
 ) -> Response {
-    handle_upload(state, headers, params, body).await
+    handle_upload(state, connect_info, headers, params, body).await
 }
 
 async fn upload_handler_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path(filename): Path<String>,
     Query(mut params): Query<UploadQuery>,
@@ -252,16 +477,39 @@ async fn upload_handler_named(
     {
         params.name = Some(filename);
     }
-    handle_upload(state, headers, params, body).await
+    handle_upload(state, connect_info, headers, params, body).await
 }
 
 async fn handle_upload(
     state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     params: UploadQuery,
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
+
+    if let Some(limiter) = &state.upload_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(upload_error(
+                response_mode,
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "Too many requests. Try again shortly.",
+            ));
+        }
+    }
+
+    if !upload_authorized(&headers, &state.config) {
+        return upload_error(
+            response_mode,
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "This server requires an upload token. Send 'Authorization: Bearer <token>'.",
+        );
+    }
+
     let content_length = match headers.get(header::CONTENT_LENGTH) {
         Some(value) => match value.to_str().ok().and_then(|v| v.parse::<u64>().ok()) {
             Some(length) => length,
@@ -300,6 +548,37 @@ async fn handle_upload(
             "FILE_TOO_LARGE",
             "File exceeds the configured size limit.",
         );
+    }
+
+    // Usage is summed from the DB rather than the filesystem: every live file
+    // has a row, and rare crash orphans are reclaimed by the cleanup loop.
+    // Concurrent uploads can each pass this check, so the cap can overshoot
+    // by up to MAX_FILE_SIZE per in-flight upload.
+    if let Some(cap) = state.config.max_total_storage {
+        let used = match sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM uploads",
+        )
+        .fetch_one(&state.pool)
+        .await
+        {
+            Ok(value) => value.max(0) as u64,
+            Err(_) => {
+                return upload_error(
+                    response_mode,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "STORAGE_CHECK_FAILED",
+                    "Could not check storage usage.",
+                )
+            }
+        };
+        if used.saturating_add(content_length) > cap {
+            return upload_error(
+                response_mode,
+                StatusCode::INSUFFICIENT_STORAGE,
+                "STORAGE_FULL",
+                "Server storage is full. Try again later.",
+            );
+        }
     }
 
     let filename = params
@@ -395,9 +674,10 @@ async fn handle_upload(
     let now = Utc::now();
     let expires_at = now + ChronoDuration::from_std(expiry).unwrap_or_else(|_| ChronoDuration::seconds(0));
     let stored_path = file_path.to_string_lossy().to_string();
+    let delete_token = generate_delete_token();
 
     if let Err(_) = sqlx::query(
-        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&code)
     .bind(&filename)
@@ -406,6 +686,7 @@ async fn handle_upload(
     .bind(&sha256_hex)
     .bind(now.to_rfc3339())
     .bind(expires_at.to_rfc3339())
+    .bind(&delete_token)
     .execute(&state.pool)
     .await
     {
@@ -418,10 +699,11 @@ async fn handle_upload(
         );
     }
 
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     let encoded_filename = urlencoding::encode(&filename);
     let download_page_url = format!("{base_url}/{code}");
     let raw_download_url = format!("{base_url}/raw/{code}/{encoded_filename}");
+    let delete_url = format!("{base_url}/delete/{code}?token={delete_token}");
 
     let response = UploadResponse {
         success: true,
@@ -433,6 +715,8 @@ async fn handle_upload(
         expires_in_seconds: (expires_at - now).num_seconds(),
         download_page_url: download_page_url.clone(),
         raw_download_url,
+        delete_token,
+        delete_url: delete_url.clone(),
         warning,
     };
 
@@ -440,7 +724,7 @@ async fn handle_upload(
         UploadResponseMode::Json => json_response(StatusCode::CREATED, &response),
         UploadResponseMode::Plain => (
             StatusCode::CREATED,
-            format!("{download_page_url}\nsha256:{sha256_hex}\n"),
+            format!("{download_page_url}\nsha256:{sha256_hex}\ndelete:{delete_url}\n"),
         )
             .into_response(),
     }
@@ -448,32 +732,64 @@ async fn handle_upload(
 
 async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
     // Pass base_url so the CLI quickstart snippet shows the actual server URL
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     Html(render_upload_page(&state.templates, &state.config, &base_url))
+}
+
+async fn healthz(State(state): State<AppState>) -> Response {
+    match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
+        Ok(_) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"ok"}"#,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"error"}"#,
+        )
+            .into_response(),
+    }
 }
 
 async fn download_page_code(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    download_page(state, headers, code, None).await
+    download_page(state, connect_info, headers, code, None).await
 }
 
 async fn download_page_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path((code, filename)): Path<(String, String)>,
 ) -> Response {
-    download_page(state, headers, code, Some(filename)).await
+    download_page(state, connect_info, headers, code, Some(filename)).await
 }
 
 async fn download_page(
     state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     code: String,
     filename: Option<String>,
 ) -> Response {
+    if let Some(limiter) = &state.lookup_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(html_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+                &state.templates,
+                &state.config,
+            ));
+        }
+    }
+
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -505,7 +821,7 @@ async fn download_page(
 
     let canonical_filename = record.original_filename.clone();
     let encoded = urlencoding::encode(&canonical_filename);
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     let canonical_url = format!("{base_url}/{code}/{encoded}");
 
     if filename.as_deref() != Some(&canonical_filename) {
@@ -517,19 +833,38 @@ async fn download_page(
 
 async fn raw_download_code(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    raw_download(state, code).await
+    raw_download(state, connect_info, headers, code).await
 }
 
 async fn raw_download_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path((code, _filename)): Path<(String, String)>,
 ) -> Response {
-    raw_download(state, code).await
+    raw_download(state, connect_info, headers, code).await
 }
 
-async fn raw_download(state: AppState, code: String) -> Response {
+async fn raw_download(
+    state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    code: String,
+) -> Response {
+    if let Some(limiter) = &state.lookup_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(plain_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+            ));
+        }
+    }
+
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
@@ -568,9 +903,144 @@ async fn raw_download(state: AppState, code: String) -> Response {
     response
 }
 
+fn generate_delete_token() -> String {
+    // 62^32 possibilities: long enough that no uniqueness check is needed
+    rand::thread_rng()
+        .sample_iter(Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
+async fn perform_delete(
+    state: &AppState,
+    code: &str,
+    token: &str,
+) -> Result<DeleteOutcome, anyhow::Error> {
+    let Some(record) = fetch_upload(&state.pool, code).await? else {
+        return Ok(DeleteOutcome::NotFound);
+    };
+    // Rows from before the delete-token migration store an empty token and
+    // must stay undeletable; without this check an empty token would match.
+    if record.delete_token.is_empty()
+        || !constant_time_eq(token.as_bytes(), record.delete_token.as_bytes())
+    {
+        return Ok(DeleteOutcome::Forbidden);
+    }
+    // DB row first, then the file — same order and reasoning as cleanup_loop
+    sqlx::query("DELETE FROM uploads WHERE code = ?")
+        .bind(code)
+        .execute(&state.pool)
+        .await?;
+    let _ = fs::remove_file(&record.stored_path).await;
+    Ok(DeleteOutcome::Deleted)
+}
+
+async fn delete_api(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Query(params): Query<DeleteQuery>,
+) -> Response {
+    let token = params.token.unwrap_or_default();
+    match perform_delete(&state, &code, &token).await {
+        Ok(DeleteOutcome::Deleted) => json_response(
+            StatusCode::OK,
+            &serde_json::json!({ "success": true, "code": code }),
+        ),
+        Ok(DeleteOutcome::NotFound) => json_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "File not found or already deleted.",
+        ),
+        Ok(DeleteOutcome::Forbidden) => json_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Invalid delete token.",
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SERVER_ERROR",
+            "Could not delete the file.",
+        ),
+    }
+}
+
+async fn delete_confirm_page(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Query(params): Query<DeleteQuery>,
+) -> Response {
+    let token = params.token.unwrap_or_default();
+    let record = match fetch_upload(&state.pool, &code).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return html_error(
+                StatusCode::NOT_FOUND,
+                "This file does not exist or was already deleted.",
+                &state.templates,
+                &state.config,
+            )
+        }
+        Err(_) => {
+            return html_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong while loading this file.",
+                &state.templates,
+                &state.config,
+            )
+        }
+    };
+    // Validate before rendering; the page never deletes on GET so link
+    // prefetchers cannot remove files.
+    if record.delete_token.is_empty()
+        || !constant_time_eq(token.as_bytes(), record.delete_token.as_bytes())
+    {
+        return html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid delete link.",
+            &state.templates,
+            &state.config,
+        );
+    }
+    Html(render_delete_page(&record, &state.templates, &state.config)).into_response()
+}
+
+async fn delete_form_action(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    axum::Form(form): axum::Form<DeleteForm>,
+) -> Response {
+    match perform_delete(&state, &code, &form.token).await {
+        Ok(DeleteOutcome::Deleted) => html_error(
+            StatusCode::OK,
+            "File deleted.",
+            &state.templates,
+            &state.config,
+        ),
+        Ok(DeleteOutcome::NotFound) => html_error(
+            StatusCode::NOT_FOUND,
+            "This file does not exist or was already deleted.",
+            &state.templates,
+            &state.config,
+        ),
+        Ok(DeleteOutcome::Forbidden) => html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid delete token.",
+            &state.templates,
+            &state.config,
+        ),
+        Err(_) => html_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the file.",
+            &state.templates,
+            &state.config,
+        ),
+    }
+}
+
 async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
     let row = sqlx::query(
-        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at FROM uploads WHERE code = ?",
+        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token FROM uploads WHERE code = ?",
     )
     .bind(code)
     .fetch_optional(pool)
@@ -591,15 +1061,19 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
         sha256_hex: row.try_get("sha256_hex")?,
         created_at: parse_datetime(&created_at)?,
         expires_at: parse_datetime(&expires_at)?,
+        delete_token: row.try_get("delete_token")?,
     };
 
     Ok(Some(record))
 }
 
-async fn cleanup_loop(state: AppState) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+async fn cleanup_loop(state: AppState, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(state.config.cleanup_interval);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown_rx.changed() => break,
+        }
         let now = Utc::now().to_rfc3339();
         let rows = match sqlx::query("SELECT code, stored_path FROM uploads WHERE expires_at <= ?")
             .bind(&now)
@@ -668,6 +1142,14 @@ fn plain_error(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
 }
 
+fn rate_limited(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        header::HeaderValue::from_static("60"),
+    );
+    response
+}
+
 fn html_error(status: StatusCode, message: &str, templates: &Templates, config: &AppConfig) -> Response {
     let title = escape_html(&config.brand_title);
     let page = render_template(
@@ -729,11 +1211,21 @@ fn duration_short(duration: Duration) -> String {
     }
 }
 
+// Path segments with routing meaning must never be handed out as share codes
+const RESERVED_CODES: &[&str] = &["raw", "static", "healthz", "delete"];
+
+fn is_reserved_code(code: &str) -> bool {
+    RESERVED_CODES.contains(&code)
+}
+
 async fn generate_code(pool: &Pool<Sqlite>, config: &AppConfig) -> Result<String, anyhow::Error> {
     let mut length = config.code_min_len;
     while length <= config.code_max_len {
         for _ in 0..config.code_retries {
             let code = random_code(length);
+            if is_reserved_code(&code) {
+                continue;
+            }
             let exists = sqlx::query("SELECT 1 FROM uploads WHERE code = ?")
                 .bind(&code)
                 .fetch_optional(pool)
@@ -766,6 +1258,13 @@ fn random_code(length: usize) -> String {
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>, anyhow::Error> {
     let parsed = DateTime::parse_from_rfc3339(value)?;
     Ok(parsed.with_timezone(&Utc))
+}
+
+fn resolve_base_url(config: &AppConfig, headers: &HeaderMap) -> String {
+    if let Some(base_url) = &config.base_url {
+        return base_url.clone();
+    }
+    base_url_from_headers(headers)
 }
 
 fn base_url_from_headers(headers: &HeaderMap) -> String {
@@ -864,6 +1363,13 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
 fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
+    let auth_required = config.upload_token.is_some();
+    // The page only learns whether a token is needed, never the token itself
+    let auth_snippet = if auth_required {
+        escape_html(" -H 'Authorization: Bearer <token>'")
+    } else {
+        String::new()
+    };
     // site_url is injected so the CLI quickstart shows the actual server URL
     render_template(
         &templates.upload,
@@ -871,6 +1377,21 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
             ("{{title}}", title),
             ("{{description}}", description),
             ("{{site_url}}", base_url.to_string()),
+            ("{{auth_required}}", auth_required.to_string()),
+            ("{{auth_snippet}}", auth_snippet),
+        ],
+    )
+}
+
+fn render_delete_page(record: &UploadRecord, templates: &Templates, config: &AppConfig) -> String {
+    render_template(
+        &templates.delete,
+        &[
+            ("{{title}}", escape_html(&config.brand_title)),
+            ("{{filename}}", escape_html(&record.original_filename)),
+            ("{{size}}", human_size(record.size_bytes)),
+            ("{{code}}", record.code.clone()),
+            ("{{token}}", escape_html(&record.delete_token)),
         ],
     )
 }
@@ -939,7 +1460,18 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let templates = load_templates().await.unwrap();
-        let config = AppConfig {
+        let config = test_config(data_dir);
+        AppState {
+            pool,
+            upload_limiter: RateLimiter::new(config.upload_rate_per_min),
+            lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
+            config,
+            templates,
+        }
+    }
+
+    fn test_config(data_dir: PathBuf) -> AppConfig {
+        AppConfig {
             data_dir,
             max_file_size: 1024 * 1024,
             default_expiry: Duration::from_secs(3600),
@@ -950,18 +1482,20 @@ mod tests {
             code_retries: 5,
             brand_title: "Test".to_string(),
             brand_description: "Test instance".to_string(),
-        };
-        AppState { pool, config, templates }
+            upload_token: None,
+            max_total_storage: None,
+            // Rate limiting is off in tests unless a test opts in
+            upload_rate_per_min: 0,
+            lookup_rate_per_min: 0,
+            host: "0.0.0.0".to_string(),
+            port: 3000,
+            base_url: None,
+            cleanup_interval: Duration::from_secs(3600),
+        }
     }
 
     fn test_app(state: AppState) -> Router {
-        Router::new()
-            .route("/", get(upload_page).put(upload_handler))
-            .route("/:code", get(download_page_code).put(upload_handler_named))
-            .route("/:code/:filename", get(download_page_named))
-            .route("/raw/:code", get(raw_download_code))
-            .route("/raw/:code/:filename", get(raw_download_named))
-            .with_state(state)
+        build_router(state)
     }
 
     #[test]
@@ -981,18 +1515,10 @@ mod tests {
 
     #[test]
     fn clamp_expiry_bounds() {
-        let config = AppConfig {
-            data_dir: PathBuf::from("./data"),
-            max_file_size: 10,
-            default_expiry: Duration::from_secs(3600),
-            min_expiry: Duration::from_secs(300),
-            max_expiry: Duration::from_secs(3600),
-            code_min_len: 3,
-            code_max_len: 8,
-            code_retries: 3,
-            brand_title: "DKSend".to_string(),
-            brand_description: "Drop a file, get a link.".to_string(),
-        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.max_file_size = 10;
+        config.max_expiry = Duration::from_secs(3600);
+        config.code_retries = 3;
 
         let (duration, warning) = clamp_expiry(Duration::from_secs(60), &config);
         assert_eq!(duration.as_secs(), 300);
@@ -1096,19 +1622,9 @@ mod tests {
             upload: std::fs::read_to_string("static/upload.html").unwrap(),
             download: String::new(),
             error: String::new(),
+            delete: String::new(),
         };
-        let config = AppConfig {
-            data_dir: PathBuf::from("./data"),
-            max_file_size: 1024,
-            default_expiry: Duration::from_secs(3600),
-            min_expiry: Duration::from_secs(300),
-            max_expiry: Duration::from_secs(86400),
-            code_min_len: 3,
-            code_max_len: 8,
-            code_retries: 3,
-            brand_title: "Test".to_string(),
-            brand_description: "Test".to_string(),
-        };
+        let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(
             !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
@@ -1208,7 +1724,7 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         let lines: Vec<&str> = text.trim_end().split('\n').collect();
-        assert_eq!(lines.len(), 2, "expected URL and sha256 lines, got: {text:?}");
+        assert_eq!(lines.len(), 3, "expected URL, sha256, and delete lines, got: {text:?}");
         assert!(
             lines[0].starts_with("http") && !lines[0].contains("plain.txt"),
             "page URL line should be the bare /<code> form, got {:?}",
@@ -1217,6 +1733,11 @@ mod tests {
         assert_eq!(
             lines[1],
             "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert!(
+            lines[2].starts_with("delete:http") && lines[2].contains("/delete/"),
+            "third line should be the delete URL, got {:?}",
+            lines[2]
         );
     }
 
@@ -1432,5 +1953,569 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["filename"], "myfile.txt");
+    }
+
+    #[test]
+    fn constant_time_eq_basic() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secres"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    fn put_request(token: Option<&str>) -> Request<Body> {
+        let body = "hello";
+        let mut builder = Request::put("/?name=auth.txt")
+            .header("content-length", body.len().to_string());
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_401_without_token_when_auth_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["error"]["code"], "UNAUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn upload_401_with_wrong_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(Some("wrong"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn upload_succeeds_with_valid_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state.clone());
+
+        let response = app.oneshot(put_request(Some("s3cret"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        // Downloads stay public: no Authorization header needed
+        let raw_path = format!("/raw/{code}/auth.txt");
+        let download_resp = test_app(state)
+            .oneshot(Request::get(&raw_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_open_when_token_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    async fn upload_for_delete(state: &AppState) -> (String, String) {
+        let body = "delete me";
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=victim.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (
+            data["code"].as_str().unwrap().to_string(),
+            data["delete_token"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn upload_response_includes_delete_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let body = "hello";
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=f.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let token = data["delete_token"].as_str().unwrap();
+        assert_eq!(token.len(), 32);
+        let delete_url = data["delete_url"].as_str().unwrap();
+        let code = data["code"].as_str().unwrap();
+        assert!(delete_url.contains(&format!("/delete/{code}?token={token}")));
+    }
+
+    #[tokio::test]
+    async fn delete_with_valid_token_removes_file_and_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let file_path = state.config.data_dir.join("files").join(&code);
+        assert!(file_path.exists(), "file should exist before delete");
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::delete(format!("/{code}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!file_path.exists(), "file should be gone after delete");
+
+        let response = test_app(state)
+            .oneshot(Request::get(format!("/{code}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_with_wrong_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::delete(format!("/{code}?token=wrongwrongwrongwrongwrongwrong12"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // File is still downloadable
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/victim.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_without_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::delete(format!("/{code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_twice_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::delete(format!("/{code}?token={token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_rejected_for_legacy_empty_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        // Simulate a row created before the delete_token migration
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, '')",
+        )
+        .bind("legacy")
+        .bind("old.txt")
+        .bind("/tmp/none")
+        .bind(4i64)
+        .bind("")
+        .bind(now.to_rfc3339())
+        .bind((now + ChronoDuration::hours(1)).to_rfc3339())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        for token_query in ["", "?token="] {
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::delete(format!("/legacy{token_query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "empty stored token must never match"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_page_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/delete/{code}?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("victim.txt"));
+        assert!(html.contains(&format!(r#"action="/delete/{code}""#)));
+        assert!(html.contains(r#"name="token""#));
+    }
+
+    #[tokio::test]
+    async fn delete_confirm_page_wrong_token_forbidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _token) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/delete/{code}?token=nope"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_form_post_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, token) = upload_for_delete(&state).await;
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::post(format!("/delete/{code}"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("File deleted."));
+
+        let response = test_app(state)
+            .oneshot(Request::get(format!("/{code}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["status"], "ok");
+    }
+
+    #[test]
+    fn resolve_base_url_env_override() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.base_url = Some("https://files.example.com".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("internal:3000"));
+        assert_eq!(
+            resolve_base_url(&config, &headers),
+            "https://files.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_falls_back_to_host_header() {
+        let config = test_config(PathBuf::from("./data"));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(resolve_base_url(&config, &headers), "https://example.com");
+    }
+
+    #[test]
+    fn reserved_codes_not_generated() {
+        for code in ["raw", "static", "healthz", "delete"] {
+            assert!(is_reserved_code(code), "{code} must be reserved");
+        }
+        assert!(!is_reserved_code("abc12"));
+    }
+
+    #[test]
+    fn rate_limiter_disabled_when_zero() {
+        assert!(RateLimiter::new(0).is_none());
+        assert!(RateLimiter::new(1).is_some());
+    }
+
+    #[test]
+    fn rate_limiter_refills_over_time() {
+        let limiter = RateLimiter::new(60).unwrap(); // 1 token/sec refill
+        let start = Instant::now();
+        for _ in 0..60 {
+            assert!(limiter.allow_at("ip", start));
+        }
+        assert!(!limiter.allow_at("ip", start), "bucket should be empty");
+        assert!(
+            limiter.allow_at("ip", start + Duration::from_secs(2)),
+            "bucket should refill over time"
+        );
+    }
+
+    #[test]
+    fn client_ip_prefers_forwarded_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4, 10.0.0.1"));
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(&addr)), "1.2.3.4");
+        assert_eq!(client_ip(&HeaderMap::new(), Some(&addr)), "127.0.0.1");
+        assert_eq!(client_ip(&HeaderMap::new(), None), "unknown");
+    }
+
+    #[tokio::test]
+    async fn upload_rate_limited_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.upload_limiter = RateLimiter::new(2);
+
+        for expected in [StatusCode::CREATED, StatusCode::CREATED, StatusCode::TOO_MANY_REQUESTS] {
+            let body = "hello";
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::put("/?name=f.txt")
+                        .header("content-length", body.len().to_string())
+                        .header("x-forwarded-for", "1.2.3.4")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::TOO_MANY_REQUESTS {
+                assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "60");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_keys_by_ip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.upload_limiter = RateLimiter::new(1);
+
+        for (ip, expected) in [
+            ("1.2.3.4", StatusCode::CREATED),
+            ("1.2.3.4", StatusCode::TOO_MANY_REQUESTS),
+            ("5.6.7.8", StatusCode::CREATED),
+        ] {
+            let body = "hello";
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::put("/?name=f.txt")
+                        .header("content-length", body.len().to_string())
+                        .header("x-forwarded-for", ip)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "ip {ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_rate_limited_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.lookup_limiter = RateLimiter::new(1);
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::get("/nope1")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::get("/nope2")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Raw downloads share the lookup limiter
+        let response = test_app(state)
+            .oneshot(
+                Request::get("/raw/nope3/f.txt")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn upload_rejected_when_storage_cap_exceeded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.max_total_storage = Some(15);
+
+        let body = "elevenbytes"; // 11 bytes
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=a.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=b.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["error"]["code"], "STORAGE_FULL");
+    }
+
+    #[tokio::test]
+    async fn upload_allowed_within_storage_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.max_total_storage = Some(1024);
+
+        let body = "hello";
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=a.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn upload_page_shows_token_field_when_auth_enabled() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+            delete: String::new(),
+        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.upload_token = Some("s3cret".to_string());
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-auth-required="true""#));
+        assert!(html.contains("Authorization: Bearer"), "quickstart should show the auth header");
+        assert!(!html.contains("s3cret"), "the token itself must never reach the page");
+    }
+
+    #[test]
+    fn upload_page_hides_token_field_when_open() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+            delete: String::new(),
+        };
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-auth-required="false""#));
+        assert!(!html.contains("Authorization: Bearer"));
     }
 }
