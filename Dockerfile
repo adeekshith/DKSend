@@ -21,7 +21,7 @@ COPY --from=builder /app/static /app/static
 
 ENV DATA_DIR=/data
 EXPOSE 3000
-# BusyBox wget ships with Alpine; override the URL if you change PORT
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-    CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
+# No baked-in HEALTHCHECK: the periodic check process keeps file pages
+# active and inflates docker stats. Opt in via compose or --health-cmd
+# against GET /healthz instead.
 ENTRYPOINT ["/dksend"]
