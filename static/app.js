@@ -51,6 +51,7 @@ if (uploadForm) {
   const fileInput = document.getElementById('file');
   const filenameInput = document.getElementById('filename');
   const expirySelect = document.getElementById('expiry');
+  const tokenInput = document.getElementById('token');
   let droppedFile = null;
   const dropLabel = dropZone?.querySelector('span');
   const DEFAULT_DROP_LABEL = dropLabel?.textContent || 'Drag & drop or click to choose a file';
@@ -161,8 +162,14 @@ if (uploadForm) {
       submitButton.textContent = 'Uploading...';
     }
 
+    const headers = {};
+    const token = (tokenInput?.value || '').trim();
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+
     try {
-      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file });
+      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file, headers });
       const data = await res.json();
       if (!data.success) {
         throw new Error(data.error?.message || 'Upload failed');

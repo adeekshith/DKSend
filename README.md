@@ -38,6 +38,17 @@ The JSON response includes a `sha256` field with the hex-encoded SHA-256 digest 
 }
 ```
 
+## Authentication
+
+Uploads are open to anyone by default. Set `UPLOAD_TOKEN` to require a shared token for uploads — recommended for instances reachable from the internet:
+
+```bash
+UPLOAD_TOKEN=change-me cargo run
+curl -H "Authorization: Bearer change-me" --upload-file ./hello.txt http://localhost:3000
+```
+
+The web UI shows an "Upload token" field when a token is configured. Downloads stay public; anyone with a share link can fetch the file.
+
 ## Download
 
 - Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
@@ -53,6 +64,7 @@ Environment variables:
 - `MAX_EXPIRY` (default: `7d`)
 - `BRAND_TITLE` (default: `Send Files`) - HTML title and header text
 - `BRAND_DESCRIPTION` (default: empty) - optional tagline shown below the heading
+- `UPLOAD_TOKEN` (default: unset = open uploads) - require `Authorization: Bearer <token>` for uploads
 
 Durations use `30m`, `1h`, `2d`.
 

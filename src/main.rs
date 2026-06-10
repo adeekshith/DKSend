@@ -41,6 +41,7 @@ struct AppConfig {
     code_retries: usize,
     brand_title: String,
     brand_description: String,
+    upload_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -144,21 +145,7 @@ async fn run() -> Result<(), anyhow::Error> {
         templates,
     };
 
-    let static_service = get_service(ServeDir::new("static")).layer(
-        SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store"),
-        ),
-    );
-
-    let app = Router::new()
-        .route("/", get(upload_page).put(upload_handler))
-        .nest_service("/static", static_service)
-        .route("/raw/:code", get(raw_download_code))
-        .route("/raw/:code/:filename", get(raw_download_named))
-        .route("/:code", get(download_page_code).put(upload_handler_named))
-        .route("/:code/:filename", get(download_page_named))
-        .with_state(state.clone());
+    let app = build_router(state.clone());
 
     let cleanup_state = state.clone();
     tokio::spawn(async move {
@@ -173,6 +160,24 @@ async fn run() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+
+fn build_router(state: AppState) -> Router {
+    let static_service = get_service(ServeDir::new("static")).layer(
+        SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        ),
+    );
+
+    Router::new()
+        .route("/", get(upload_page).put(upload_handler))
+        .nest_service("/static", static_service)
+        .route("/raw/:code", get(raw_download_code))
+        .route("/raw/:code/:filename", get(raw_download_named))
+        .route("/:code", get(download_page_code).put(upload_handler_named))
+        .route("/:code/:filename", get(download_page_named))
+        .with_state(state)
+}
 
 async fn load_templates() -> Result<Templates, anyhow::Error> {
     let upload = fs::read_to_string("static/upload.html").await?;
@@ -214,6 +219,12 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
     // Tagline is empty by default; set BRAND_DESCRIPTION to add one
     let brand_description = env::var("BRAND_DESCRIPTION").unwrap_or_default();
 
+    // Unset or empty UPLOAD_TOKEN leaves uploads open to anyone
+    let upload_token = env::var("UPLOAD_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -225,7 +236,36 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         code_retries: 5,
         brand_title,
         brand_description,
+        upload_token,
     })
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
+    let Some(expected) = config.upload_token.as_deref() else {
+        return true;
+    };
+    let Some(provided) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
+                Some(trimmed[7..].trim())
+            } else {
+                None
+            }
+        })
+    else {
+        return false;
+    };
+    constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
 async fn upload_handler(
@@ -262,6 +302,16 @@ async fn handle_upload(
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
+
+    if !upload_authorized(&headers, &state.config) {
+        return upload_error(
+            response_mode,
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "This server requires an upload token. Send 'Authorization: Bearer <token>'.",
+        );
+    }
+
     let content_length = match headers.get(header::CONTENT_LENGTH) {
         Some(value) => match value.to_str().ok().and_then(|v| v.parse::<u64>().ok()) {
             Some(length) => length,
@@ -864,6 +914,13 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
 fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
+    let auth_required = config.upload_token.is_some();
+    // The page only learns whether a token is needed, never the token itself
+    let auth_snippet = if auth_required {
+        escape_html(" -H 'Authorization: Bearer <token>'")
+    } else {
+        String::new()
+    };
     // site_url is injected so the CLI quickstart shows the actual server URL
     render_template(
         &templates.upload,
@@ -871,6 +928,8 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
             ("{{title}}", title),
             ("{{description}}", description),
             ("{{site_url}}", base_url.to_string()),
+            ("{{auth_required}}", auth_required.to_string()),
+            ("{{auth_snippet}}", auth_snippet),
         ],
     )
 }
@@ -939,7 +998,12 @@ mod tests {
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let templates = load_templates().await.unwrap();
-        let config = AppConfig {
+        let config = test_config(data_dir);
+        AppState { pool, config, templates }
+    }
+
+    fn test_config(data_dir: PathBuf) -> AppConfig {
+        AppConfig {
             data_dir,
             max_file_size: 1024 * 1024,
             default_expiry: Duration::from_secs(3600),
@@ -950,18 +1014,12 @@ mod tests {
             code_retries: 5,
             brand_title: "Test".to_string(),
             brand_description: "Test instance".to_string(),
-        };
-        AppState { pool, config, templates }
+            upload_token: None,
+        }
     }
 
     fn test_app(state: AppState) -> Router {
-        Router::new()
-            .route("/", get(upload_page).put(upload_handler))
-            .route("/:code", get(download_page_code).put(upload_handler_named))
-            .route("/:code/:filename", get(download_page_named))
-            .route("/raw/:code", get(raw_download_code))
-            .route("/raw/:code/:filename", get(raw_download_named))
-            .with_state(state)
+        build_router(state)
     }
 
     #[test]
@@ -981,18 +1039,10 @@ mod tests {
 
     #[test]
     fn clamp_expiry_bounds() {
-        let config = AppConfig {
-            data_dir: PathBuf::from("./data"),
-            max_file_size: 10,
-            default_expiry: Duration::from_secs(3600),
-            min_expiry: Duration::from_secs(300),
-            max_expiry: Duration::from_secs(3600),
-            code_min_len: 3,
-            code_max_len: 8,
-            code_retries: 3,
-            brand_title: "DKSend".to_string(),
-            brand_description: "Drop a file, get a link.".to_string(),
-        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.max_file_size = 10;
+        config.max_expiry = Duration::from_secs(3600);
+        config.code_retries = 3;
 
         let (duration, warning) = clamp_expiry(Duration::from_secs(60), &config);
         assert_eq!(duration.as_secs(), 300);
@@ -1097,18 +1147,7 @@ mod tests {
             download: String::new(),
             error: String::new(),
         };
-        let config = AppConfig {
-            data_dir: PathBuf::from("./data"),
-            max_file_size: 1024,
-            default_expiry: Duration::from_secs(3600),
-            min_expiry: Duration::from_secs(300),
-            max_expiry: Duration::from_secs(86400),
-            code_min_len: 3,
-            code_max_len: 8,
-            code_retries: 3,
-            brand_title: "Test".to_string(),
-            brand_description: "Test".to_string(),
-        };
+        let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(
             !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
@@ -1432,5 +1471,109 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(data["filename"], "myfile.txt");
+    }
+
+    #[test]
+    fn constant_time_eq_basic() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secres"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    fn put_request(token: Option<&str>) -> Request<Body> {
+        let body = "hello";
+        let mut builder = Request::put("/?name=auth.txt")
+            .header("content-length", body.len().to_string());
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_401_without_token_when_auth_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["error"]["code"], "UNAUTHORIZED");
+    }
+
+    #[tokio::test]
+    async fn upload_401_with_wrong_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(Some("wrong"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn upload_succeeds_with_valid_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state.clone());
+
+        let response = app.oneshot(put_request(Some("s3cret"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        // Downloads stay public: no Authorization header needed
+        let raw_path = format!("/raw/{code}/auth.txt");
+        let download_resp = test_app(state)
+            .oneshot(Request::get(&raw_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_open_when_token_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app.oneshot(put_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn upload_page_shows_token_field_when_auth_enabled() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.upload_token = Some("s3cret".to_string());
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-auth-required="true""#));
+        assert!(html.contains("Authorization: Bearer"), "quickstart should show the auth header");
+        assert!(!html.contains("s3cret"), "the token itself must never reach the page");
+    }
+
+    #[test]
+    fn upload_page_hides_token_field_when_open() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+        };
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-auth-required="false""#));
+        assert!(!html.contains("Authorization: Bearer"));
     }
 }

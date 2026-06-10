@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{title}}</title>
-    <link rel="stylesheet" href="/static/app.css?v=4">
+    <link rel="stylesheet" href="/static/app.css?v=5">
   </head>
   <body>
     <main class="shell">
@@ -12,7 +12,7 @@
         <h1>{{title}}</h1>
       </header>
       <section class="card">
-        <form id="upload-form">
+        <form id="upload-form" data-auth-required="{{auth_required}}">
           <label class="drop" id="drop-zone">
             <input type="file" id="file">
             <span>Drag &amp; drop or click to choose a file</span>
@@ -33,6 +33,12 @@
               </select>
             </label>
           </div>
+          <div class="row token-row">
+            <label>
+              Upload token
+              <input type="password" id="token" autocomplete="off" placeholder="Required on this server">
+            </label>
+          </div>
           <button type="submit">Upload</button>
         </form>
         <div id="result" class="result hidden" data-result></div>
@@ -41,10 +47,10 @@
         <div>
           <h2>CLI quickstart</h2>
           <!-- {{site_url}} is replaced server-side with the actual request origin -->
-          <pre>curl --upload-file ./hello.txt {{site_url}}</pre>
+          <pre>curl{{auth_snippet}} --upload-file ./hello.txt {{site_url}}</pre>
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=4" defer></script>
+    <script src="/static/app.js?v=5" defer></script>
   </body>
 </html>
