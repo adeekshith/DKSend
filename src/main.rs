@@ -50,6 +50,10 @@ struct AppConfig {
     max_total_storage: Option<u64>,
     upload_rate_per_min: u32,
     lookup_rate_per_min: u32,
+    host: String,
+    port: u16,
+    base_url: Option<String>,
+    cleanup_interval: Duration,
 }
 
 struct Bucket {
@@ -225,21 +229,47 @@ async fn run() -> Result<(), anyhow::Error> {
 
     let app = build_router(state.clone());
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let cleanup_state = state.clone();
     tokio::spawn(async move {
-        cleanup_loop(cleanup_state).await;
+        cleanup_loop(cleanup_state, shutdown_rx).await;
     });
 
-    let listen_addr = "0.0.0.0:3000";
-    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    let listen_addr = format!("{}:{}", state.config.host, state.config.port);
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     println!("{} listening on http://{listen_addr}", brand_title);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
+    let _ = shutdown_tx.send(true);
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    eprintln!("DKSend: shutdown signal received, finishing in-flight requests");
 }
 
 
@@ -253,6 +283,7 @@ fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(upload_page).put(upload_handler))
+        .route("/healthz", get(healthz))
         .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
@@ -323,6 +354,25 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(60);
 
+    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(3000);
+
+    // When set, BASE_URL overrides Host-header-derived URLs (use behind
+    // a reverse proxy that doesn't forward the public host)
+    let base_url = env::var("BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+
+    let cleanup_interval = env::var("CLEANUP_INTERVAL")
+        .ok()
+        .and_then(|value| parse_duration(&value).ok())
+        .unwrap_or(Duration::from_secs(60 * 60))
+        .max(Duration::from_secs(60));
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -338,6 +388,10 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         max_total_storage,
         upload_rate_per_min,
         lookup_rate_per_min,
+        host,
+        port,
+        base_url,
+        cleanup_interval,
     })
 }
 
@@ -615,7 +669,7 @@ async fn handle_upload(
         );
     }
 
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     let encoded_filename = urlencoding::encode(&filename);
     let download_page_url = format!("{base_url}/{code}");
     let raw_download_url = format!("{base_url}/raw/{code}/{encoded_filename}");
@@ -645,8 +699,25 @@ async fn handle_upload(
 
 async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
     // Pass base_url so the CLI quickstart snippet shows the actual server URL
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     Html(render_upload_page(&state.templates, &state.config, &base_url))
+}
+
+async fn healthz(State(state): State<AppState>) -> Response {
+    match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
+        Ok(_) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"ok"}"#,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"error"}"#,
+        )
+            .into_response(),
+    }
 }
 
 async fn download_page_code(
@@ -717,7 +788,7 @@ async fn download_page(
 
     let canonical_filename = record.original_filename.clone();
     let encoded = urlencoding::encode(&canonical_filename);
-    let base_url = base_url_from_headers(&headers);
+    let base_url = resolve_base_url(&state.config, &headers);
     let canonical_url = format!("{base_url}/{code}/{encoded}");
 
     if filename.as_deref() != Some(&canonical_filename) {
@@ -827,10 +898,13 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
     Ok(Some(record))
 }
 
-async fn cleanup_loop(state: AppState) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+async fn cleanup_loop(state: AppState, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(state.config.cleanup_interval);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown_rx.changed() => break,
+        }
         let now = Utc::now().to_rfc3339();
         let rows = match sqlx::query("SELECT code, stored_path FROM uploads WHERE expires_at <= ?")
             .bind(&now)
@@ -968,11 +1042,21 @@ fn duration_short(duration: Duration) -> String {
     }
 }
 
+// Path segments with routing meaning must never be handed out as share codes
+const RESERVED_CODES: &[&str] = &["raw", "static", "healthz", "delete"];
+
+fn is_reserved_code(code: &str) -> bool {
+    RESERVED_CODES.contains(&code)
+}
+
 async fn generate_code(pool: &Pool<Sqlite>, config: &AppConfig) -> Result<String, anyhow::Error> {
     let mut length = config.code_min_len;
     while length <= config.code_max_len {
         for _ in 0..config.code_retries {
             let code = random_code(length);
+            if is_reserved_code(&code) {
+                continue;
+            }
             let exists = sqlx::query("SELECT 1 FROM uploads WHERE code = ?")
                 .bind(&code)
                 .fetch_optional(pool)
@@ -1005,6 +1089,13 @@ fn random_code(length: usize) -> String {
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>, anyhow::Error> {
     let parsed = DateTime::parse_from_rfc3339(value)?;
     Ok(parsed.with_timezone(&Utc))
+}
+
+fn resolve_base_url(config: &AppConfig, headers: &HeaderMap) -> String {
+    if let Some(base_url) = &config.base_url {
+        return base_url.clone();
+    }
+    base_url_from_headers(headers)
 }
 
 fn base_url_from_headers(headers: &HeaderMap) -> String {
@@ -1214,6 +1305,10 @@ mod tests {
             // Rate limiting is off in tests unless a test opts in
             upload_rate_per_min: 0,
             lookup_rate_per_min: 0,
+            host: "0.0.0.0".to_string(),
+            port: 3000,
+            base_url: None,
+            cleanup_interval: Duration::from_secs(3600),
         }
     }
 
@@ -1746,6 +1841,51 @@ mod tests {
 
         let response = app.oneshot(put_request(None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let app = test_app(state);
+
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["status"], "ok");
+    }
+
+    #[test]
+    fn resolve_base_url_env_override() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.base_url = Some("https://files.example.com".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("internal:3000"));
+        assert_eq!(
+            resolve_base_url(&config, &headers),
+            "https://files.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_falls_back_to_host_header() {
+        let config = test_config(PathBuf::from("./data"));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(resolve_base_url(&config, &headers), "https://example.com");
+    }
+
+    #[test]
+    fn reserved_codes_not_generated() {
+        for code in ["raw", "static", "healthz", "delete"] {
+            assert!(is_reserved_code(code), "{code} must be reserved");
+        }
+        assert!(!is_reserved_code("abc12"));
     }
 
     #[test]

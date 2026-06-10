@@ -58,6 +58,9 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 
 Environment variables:
 
+- `HOST` (default: `0.0.0.0`) - bind address
+- `PORT` (default: `3000`) - listen port
+- `BASE_URL` (default: unset) - public URL used in share links, e.g. `https://files.example.com`; when unset, URLs are derived from the `Host` header
 - `DATA_DIR` (default: `./data`) - storage path for database + files
 - `MAX_FILE_SIZE` in bytes (default: 209715200)
 - `DEFAULT_EXPIRY` (default: `1d`)
@@ -68,8 +71,13 @@ Environment variables:
 - `MAX_TOTAL_STORAGE` in bytes (default: unset = unlimited) - cap on total stored bytes across all uploads
 - `RATE_LIMIT_UPLOADS_PER_MIN` (default: 20, 0 disables) - per-IP upload requests per minute
 - `RATE_LIMIT_LOOKUPS_PER_MIN` (default: 60, 0 disables) - per-IP download/page requests per minute
+- `CLEANUP_INTERVAL` (default: `1h`, minimum `1m`) - how often expired uploads are purged
 
 Durations use `30m`, `1h`, `2d`.
+
+## Health check
+
+`GET /healthz` returns `{"status":"ok"}` with HTTP 200 when the server and its database are reachable (503 otherwise). The Docker image ships a `HEALTHCHECK` that polls it. The server also shuts down cleanly on SIGTERM/SIGINT, finishing in-flight requests, so `docker stop` is fast.
 
 ## Docker / Podman
 
@@ -91,6 +99,16 @@ Podman:
 podman build -t dksend .
 podman run --rm -p 3000:3000 -v $(pwd)/data:/data dksend
 ```
+
+## Docker Compose
+
+A production example lives in [docker-compose.yml](docker-compose.yml):
+
+```bash
+docker compose up -d
+```
+
+Uncomment `BASE_URL`, `UPLOAD_TOKEN`, and `MAX_TOTAL_STORAGE` in the file to fit your setup.
 
 ## Deploy from GHCR
 

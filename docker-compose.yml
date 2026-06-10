@@ -1,0 +1,27 @@
+# Production example. Start with:
+#   docker compose up -d
+services:
+  dksend:
+    image: ghcr.io/adeekshith/dksend:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      DATA_DIR: /data
+      # Public URL used in share links (set when behind a reverse proxy)
+      # BASE_URL: https://files.example.com
+      # Require a shared token for uploads (downloads stay public)
+      # UPLOAD_TOKEN: change-me
+      # Total storage cap in bytes (10 GiB shown)
+      # MAX_TOTAL_STORAGE: "10737418240"
+      # MAX_FILE_SIZE: "209715200"
+      # DEFAULT_EXPIRY: 1d
+      # MAX_EXPIRY: 7d
+      # BRAND_TITLE: Send Files
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
