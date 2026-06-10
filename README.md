@@ -65,6 +65,9 @@ Environment variables:
 - `BRAND_TITLE` (default: `Send Files`) - HTML title and header text
 - `BRAND_DESCRIPTION` (default: empty) - optional tagline shown below the heading
 - `UPLOAD_TOKEN` (default: unset = open uploads) - require `Authorization: Bearer <token>` for uploads
+- `MAX_TOTAL_STORAGE` in bytes (default: unset = unlimited) - cap on total stored bytes across all uploads
+- `RATE_LIMIT_UPLOADS_PER_MIN` (default: 20, 0 disables) - per-IP upload requests per minute
+- `RATE_LIMIT_LOOKUPS_PER_MIN` (default: 60, 0 disables) - per-IP download/page requests per minute
 
 Durations use `30m`, `1h`, `2d`.
 
@@ -173,6 +176,11 @@ DATA_DIR=/tmp/dksend-test cd tests/e2e && npx playwright test
 - Expiry is clamped to a minimum of 5 minutes and a maximum of 7 days.
 - Filenames in URLs are cosmetic; mismatches redirect to the canonical name.
 - Expired uploads return HTTP 410.
+
+## Limits
+
+- When `MAX_TOTAL_STORAGE` is set, uploads that would exceed it are rejected with HTTP 507. Usage counts all uploads still on disk, including expired ones awaiting cleanup. Concurrent uploads are checked individually, so the cap can briefly overshoot by up to one `MAX_FILE_SIZE` per in-flight upload.
+- Rate-limited requests get HTTP 429 with a `Retry-After` header. Limits are keyed by client IP, using the first `X-Forwarded-For` entry when present (set by your reverse proxy) and the socket address otherwise. Lookup limits apply to download pages and raw downloads to slow share-code guessing.
 
 ## Database
 

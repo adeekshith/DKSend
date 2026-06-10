@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, get_service},
@@ -13,9 +13,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
+use std::collections::HashMap;
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -27,6 +30,8 @@ struct AppState {
     pool: Pool<Sqlite>,
     config: AppConfig,
     templates: Templates,
+    upload_limiter: Option<RateLimiter>,
+    lookup_limiter: Option<RateLimiter>,
 }
 
 #[derive(Clone)]
@@ -42,6 +47,77 @@ struct AppConfig {
     brand_title: String,
     brand_description: String,
     upload_token: Option<String>,
+    max_total_storage: Option<u64>,
+    upload_rate_per_min: u32,
+    lookup_rate_per_min: u32,
+}
+
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+// Per-IP token bucket. Good enough to slow upload spam and share-code
+// enumeration on a small instance; not a substitute for upstream protection.
+#[derive(Clone)]
+struct RateLimiter {
+    capacity: f64,
+    refill_per_sec: f64,
+    buckets: Arc<Mutex<HashMap<String, Bucket>>>,
+}
+
+impl RateLimiter {
+    fn new(per_min: u32) -> Option<RateLimiter> {
+        if per_min == 0 {
+            return None;
+        }
+        Some(RateLimiter {
+            capacity: per_min as f64,
+            refill_per_sec: per_min as f64 / 60.0,
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn allow(&self, key: &str) -> bool {
+        self.allow_at(key, Instant::now())
+    }
+
+    fn allow_at(&self, key: &str, now: Instant) -> bool {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|err| err.into_inner());
+        if buckets.len() > 10_000 {
+            // A fully refilled bucket behaves like a fresh one, so it can go
+            let capacity = self.capacity;
+            let refill = self.refill_per_sec;
+            buckets.retain(|_, bucket| {
+                let elapsed = now.duration_since(bucket.last).as_secs_f64();
+                bucket.tokens + elapsed * refill < capacity
+            });
+        }
+        let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
+            tokens: self.capacity,
+            last: now,
+        });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        bucket.last = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn client_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| addr.map(|value| value.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[derive(Clone)]
@@ -141,6 +217,8 @@ async fn run() -> Result<(), anyhow::Error> {
     let brand_title = config.brand_title.clone();
     let state = AppState {
         pool,
+        upload_limiter: RateLimiter::new(config.upload_rate_per_min),
+        lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
         config,
         templates,
     };
@@ -155,7 +233,11 @@ async fn run() -> Result<(), anyhow::Error> {
     let listen_addr = "0.0.0.0:3000";
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     println!("{} listening on http://{listen_addr}", brand_title);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -225,6 +307,22 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    // Unset means unlimited total storage
+    let max_total_storage = env::var("MAX_TOTAL_STORAGE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+
+    // 0 disables the corresponding rate limiter
+    let upload_rate_per_min = env::var("RATE_LIMIT_UPLOADS_PER_MIN")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(20);
+    let lookup_rate_per_min = env::var("RATE_LIMIT_LOOKUPS_PER_MIN")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(60);
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -237,6 +335,9 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         brand_title,
         brand_description,
         upload_token,
+        max_total_storage,
+        upload_rate_per_min,
+        lookup_rate_per_min,
     })
 }
 
@@ -270,15 +371,17 @@ fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
 
 async fn upload_handler(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Query(params): Query<UploadQuery>,
     body: Body,
 ) -> Response {
-    handle_upload(state, headers, params, body).await
+    handle_upload(state, connect_info, headers, params, body).await
 }
 
 async fn upload_handler_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path(filename): Path<String>,
     Query(mut params): Query<UploadQuery>,
@@ -292,16 +395,29 @@ async fn upload_handler_named(
     {
         params.name = Some(filename);
     }
-    handle_upload(state, headers, params, body).await
+    handle_upload(state, connect_info, headers, params, body).await
 }
 
 async fn handle_upload(
     state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     params: UploadQuery,
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
+
+    if let Some(limiter) = &state.upload_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(upload_error(
+                response_mode,
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMITED",
+                "Too many requests. Try again shortly.",
+            ));
+        }
+    }
 
     if !upload_authorized(&headers, &state.config) {
         return upload_error(
@@ -350,6 +466,37 @@ async fn handle_upload(
             "FILE_TOO_LARGE",
             "File exceeds the configured size limit.",
         );
+    }
+
+    // Usage is summed from the DB rather than the filesystem: every live file
+    // has a row, and rare crash orphans are reclaimed by the cleanup loop.
+    // Concurrent uploads can each pass this check, so the cap can overshoot
+    // by up to MAX_FILE_SIZE per in-flight upload.
+    if let Some(cap) = state.config.max_total_storage {
+        let used = match sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM uploads",
+        )
+        .fetch_one(&state.pool)
+        .await
+        {
+            Ok(value) => value.max(0) as u64,
+            Err(_) => {
+                return upload_error(
+                    response_mode,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "STORAGE_CHECK_FAILED",
+                    "Could not check storage usage.",
+                )
+            }
+        };
+        if used.saturating_add(content_length) > cap {
+            return upload_error(
+                response_mode,
+                StatusCode::INSUFFICIENT_STORAGE,
+                "STORAGE_FULL",
+                "Server storage is full. Try again later.",
+            );
+        }
     }
 
     let filename = params
@@ -504,26 +651,41 @@ async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<
 
 async fn download_page_code(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    download_page(state, headers, code, None).await
+    download_page(state, connect_info, headers, code, None).await
 }
 
 async fn download_page_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Path((code, filename)): Path<(String, String)>,
 ) -> Response {
-    download_page(state, headers, code, Some(filename)).await
+    download_page(state, connect_info, headers, code, Some(filename)).await
 }
 
 async fn download_page(
     state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     code: String,
     filename: Option<String>,
 ) -> Response {
+    if let Some(limiter) = &state.lookup_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(html_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+                &state.templates,
+                &state.config,
+            ));
+        }
+    }
+
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -567,19 +729,38 @@ async fn download_page(
 
 async fn raw_download_code(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    raw_download(state, code).await
+    raw_download(state, connect_info, headers, code).await
 }
 
 async fn raw_download_named(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path((code, _filename)): Path<(String, String)>,
 ) -> Response {
-    raw_download(state, code).await
+    raw_download(state, connect_info, headers, code).await
 }
 
-async fn raw_download(state: AppState, code: String) -> Response {
+async fn raw_download(
+    state: AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    code: String,
+) -> Response {
+    if let Some(limiter) = &state.lookup_limiter {
+        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+        if !limiter.allow(&ip) {
+            return rate_limited(plain_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+            ));
+        }
+    }
+
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
@@ -716,6 +897,14 @@ fn upload_error(mode: UploadResponseMode, status: StatusCode, code: &str, messag
 
 fn plain_error(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
+}
+
+fn rate_limited(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        header::HeaderValue::from_static("60"),
+    );
+    response
 }
 
 fn html_error(status: StatusCode, message: &str, templates: &Templates, config: &AppConfig) -> Response {
@@ -999,7 +1188,13 @@ mod tests {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let templates = load_templates().await.unwrap();
         let config = test_config(data_dir);
-        AppState { pool, config, templates }
+        AppState {
+            pool,
+            upload_limiter: RateLimiter::new(config.upload_rate_per_min),
+            lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
+            config,
+            templates,
+        }
     }
 
     fn test_config(data_dir: PathBuf) -> AppConfig {
@@ -1015,6 +1210,10 @@ mod tests {
             brand_title: "Test".to_string(),
             brand_description: "Test instance".to_string(),
             upload_token: None,
+            max_total_storage: None,
+            // Rate limiting is off in tests unless a test opts in
+            upload_rate_per_min: 0,
+            lookup_rate_per_min: 0,
         }
     }
 
@@ -1546,6 +1745,180 @@ mod tests {
         let app = test_app(state);
 
         let response = app.oneshot(put_request(None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn rate_limiter_disabled_when_zero() {
+        assert!(RateLimiter::new(0).is_none());
+        assert!(RateLimiter::new(1).is_some());
+    }
+
+    #[test]
+    fn rate_limiter_refills_over_time() {
+        let limiter = RateLimiter::new(60).unwrap(); // 1 token/sec refill
+        let start = Instant::now();
+        for _ in 0..60 {
+            assert!(limiter.allow_at("ip", start));
+        }
+        assert!(!limiter.allow_at("ip", start), "bucket should be empty");
+        assert!(
+            limiter.allow_at("ip", start + Duration::from_secs(2)),
+            "bucket should refill over time"
+        );
+    }
+
+    #[test]
+    fn client_ip_prefers_forwarded_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4, 10.0.0.1"));
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        assert_eq!(client_ip(&headers, Some(&addr)), "1.2.3.4");
+        assert_eq!(client_ip(&HeaderMap::new(), Some(&addr)), "127.0.0.1");
+        assert_eq!(client_ip(&HeaderMap::new(), None), "unknown");
+    }
+
+    #[tokio::test]
+    async fn upload_rate_limited_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.upload_limiter = RateLimiter::new(2);
+
+        for expected in [StatusCode::CREATED, StatusCode::CREATED, StatusCode::TOO_MANY_REQUESTS] {
+            let body = "hello";
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::put("/?name=f.txt")
+                        .header("content-length", body.len().to_string())
+                        .header("x-forwarded-for", "1.2.3.4")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::TOO_MANY_REQUESTS {
+                assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "60");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_keys_by_ip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.upload_limiter = RateLimiter::new(1);
+
+        for (ip, expected) in [
+            ("1.2.3.4", StatusCode::CREATED),
+            ("1.2.3.4", StatusCode::TOO_MANY_REQUESTS),
+            ("5.6.7.8", StatusCode::CREATED),
+        ] {
+            let body = "hello";
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::put("/?name=f.txt")
+                        .header("content-length", body.len().to_string())
+                        .header("x-forwarded-for", ip)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "ip {ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_rate_limited_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.lookup_limiter = RateLimiter::new(1);
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::get("/nope1")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::get("/nope2")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Raw downloads share the lookup limiter
+        let response = test_app(state)
+            .oneshot(
+                Request::get("/raw/nope3/f.txt")
+                    .header("x-forwarded-for", "1.2.3.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn upload_rejected_when_storage_cap_exceeded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.max_total_storage = Some(15);
+
+        let body = "elevenbytes"; // 11 bytes
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=a.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=b.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["error"]["code"], "STORAGE_FULL");
+    }
+
+    #[tokio::test]
+    async fn upload_allowed_within_storage_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.max_total_storage = Some(1024);
+
+        let body = "hello";
+        let response = test_app(state)
+            .oneshot(
+                Request::put("/?name=a.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
 
