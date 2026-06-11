@@ -7,6 +7,8 @@ test.describe('upload and download flow', () => {
   test('upload via file input and download', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('#upload-form')).toBeVisible();
+    // No UPLOAD_TOKEN on this server, so the token field stays hidden
+    await expect(page.locator('#token')).toBeHidden();
 
     // Create a temp file to upload
     const dir = mkdtempSync(join(tmpdir(), 'e2e-'));

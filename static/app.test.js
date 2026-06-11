@@ -163,7 +163,8 @@ function makeFakeXhrClass(getResponse, manual) {
     respond(reply) {
       const r = reply || getResponse();
       this.status = r.status ?? 200;
-      this.responseText = JSON.stringify(r.json);
+      // r.raw simulates a non-JSON reply (e.g. a reverse proxy error page)
+      this.responseText = r.raw !== undefined ? r.raw : JSON.stringify(r.json);
       this.onload?.();
     }
     fail() {
@@ -478,6 +479,23 @@ describe('drag and drop upload', () => {
     assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible on failure');
   });
 
+  it('shows "Unexpected server response" when the reply is not JSON', async () => {
+    // What a reverse proxy's auth middleware produces when it intercepts
+    // the request: its own HTML error page instead of DKSend's JSON
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [{ status: 401, raw: '<html><body>401 Unauthorized</body></html>' }],
+    });
+    const file = { name: 'f.txt', size: 10 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Unexpected server response'));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible');
+  });
+
   it('shows a network error message when the request fails', async () => {
     const dom2 = makeDom();
     const ctx2 = loadApp(dom2, { manual: true });
@@ -523,7 +541,7 @@ describe('drag and drop upload', () => {
     assert.ok(!dom.resultDiv.innerHTML.includes('<svg'), 'no svg without the library');
   });
 
-  it('sends Authorization header when the token field is filled', async () => {
+  it('sends the X-Upload-Token header when the token field is filled', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
       makeEvent('drop', { dataTransfer: { files: [file] } }),
@@ -532,10 +550,12 @@ describe('drag and drop upload', () => {
     dom.uploadForm.dispatchEvent(makeEvent('submit'));
     await new Promise((r) => setTimeout(r, 10));
     const [, opts] = ctx.getLastFetch();
-    assert.equal(opts.headers['Authorization'], 'Bearer s3cret');
+    // Not Authorization: reverse-proxy auth middleware intercepts that
+    assert.equal(opts.headers['X-Upload-Token'], 's3cret');
+    assert.equal(opts.headers['Authorization'], undefined);
   });
 
-  it('sends no Authorization header when the token field is empty', async () => {
+  it('sends no token header when the token field is empty', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
       makeEvent('drop', { dataTransfer: { files: [file] } }),
@@ -543,7 +563,7 @@ describe('drag and drop upload', () => {
     dom.uploadForm.dispatchEvent(makeEvent('submit'));
     await new Promise((r) => setTimeout(r, 10));
     const [, opts] = ctx.getLastFetch();
-    assert.equal(opts.headers['Authorization'], undefined);
+    assert.equal(opts.headers['X-Upload-Token'], undefined);
   });
 
   function dispatchPaste(targetDom, files, spy = {}) {

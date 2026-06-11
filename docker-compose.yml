@@ -14,18 +14,28 @@ services:
     # user: "1000:1000"
     # Temporary escape hatch while migrating an old root-owned install:
     # user: "0:0"
+    # All settings are optional; uncomment what you need.
     environment:
       DATA_DIR: /data
       # Public URL used in share links (set when behind a reverse proxy)
       # BASE_URL: https://files.example.com
-      # Require a shared token for uploads (downloads stay public)
+      # Require a shared token for uploads (downloads stay public);
+      # also enables the /admin page. Recommended on the open internet.
       # UPLOAD_TOKEN: change-me
-      # Total storage cap in bytes (10 GiB shown)
-      # MAX_TOTAL_STORAGE: "10737418240"
-      # MAX_FILE_SIZE: "209715200"
+      # Per-upload size limit and total storage cap, in bytes
+      # MAX_FILE_SIZE: "209715200"      # 200 MB
+      # MAX_TOTAL_STORAGE: "10737418240" # 10 GiB
+      # Default and longest allowed lifetime (30m, 12h, 7d, ...)
       # DEFAULT_EXPIRY: 1d
       # MAX_EXPIRY: 7d
+      # Per-IP rate limits per minute (0 disables)
+      # RATE_LIMIT_UPLOADS_PER_MIN: "20"
+      # RATE_LIMIT_LOOKUPS_PER_MIN: "60"
+      # Per-request log lines on stderr (docker logs); 0 disables
+      # ACCESS_LOG: "1"
+      # Page heading and optional tagline
       # BRAND_TITLE: Send Files
+      # BRAND_DESCRIPTION: Fast, friendly file drops.
     # Optional: liveness probe against the built-in /healthz endpoint.
     # Off by default — the periodic check keeps page-cache pages active,
     # which shows up as a few extra MB in docker stats.

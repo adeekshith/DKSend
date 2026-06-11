@@ -277,7 +277,12 @@ async fn run() -> Result<(), anyhow::Error> {
         config.max_expiry.as_secs(),
         config.brand_title
     );
-    fs::create_dir_all(config.data_dir.join("files")).await?;
+    let files_dir = config.data_dir.join("files");
+    fs::create_dir_all(&files_dir).await?;
+    // create_dir_all is a no-op on an existing directory and never checks
+    // writability, so a root-owned files/ from a pre-non-root image would
+    // otherwise only fail on the first upload.
+    ensure_writable(&files_dir)?;
 
     let pool = SqlitePoolOptions::new()
         .max_connections(10)
@@ -321,6 +326,22 @@ async fn run() -> Result<(), anyhow::Error> {
     let _ = shutdown_tx.send(true);
 
     Ok(())
+}
+
+fn ensure_writable(dir: &std::path::Path) -> Result<(), anyhow::Error> {
+    let probe = dir.join(".write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "data directory {} is not writable by the server process ({err}) — if you upgraded \
+             from a root-based Docker image, run on the host: chown -R 1000:1000 <your data dir> \
+             (see README, 'Upgrading from an older (root) image')",
+            dir.display()
+        )),
+    }
 }
 
 async fn shutdown_signal() {
@@ -495,6 +516,15 @@ fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
     let Some(expected) = config.upload_token.as_deref() else {
         return true;
     };
+    // X-Upload-Token is the proxy-safe spelling: reverse proxies with auth
+    // middleware (basic auth, Authelia, ...) often consume or reject the
+    // Authorization header before the request ever reaches this server.
+    if let Some(token) = headers
+        .get("x-upload-token")
+        .and_then(|value| value.to_str().ok())
+    {
+        return constant_time_eq(token.trim().as_bytes(), expected.as_bytes());
+    }
     let Some(provided) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -569,7 +599,7 @@ async fn handle_upload(
             response_mode,
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "This server requires an upload token. Send 'Authorization: Bearer <token>'.",
+            "This server requires an upload token. Send 'X-Upload-Token: <token>' or 'Authorization: Bearer <token>'.",
         );
     }
 
@@ -1741,9 +1771,10 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
     let auth_required = config.upload_token.is_some();
-    // The page only learns whether a token is needed, never the token itself
+    // The page only learns whether a token is needed, never the token itself.
+    // The quickstart shows the proxy-safe header (see upload_authorized).
     let auth_snippet = if auth_required {
-        escape_html(" -H 'Authorization: Bearer <token>'")
+        escape_html(" -H 'X-Upload-Token: <token>'")
     } else {
         String::new()
     };
@@ -2482,6 +2513,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_succeeds_with_x_upload_token_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let body = "hello";
+        let response = app
+            .oneshot(
+                Request::put("/?name=auth.txt")
+                    .header("content-length", body.len().to_string())
+                    .header("x-upload-token", "s3cret")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn upload_401_with_wrong_x_upload_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let body = "hello";
+        let response = app
+            .oneshot(
+                Request::put("/?name=auth.txt")
+                    .header("content-length", body.len().to_string())
+                    .header("x-upload-token", "wrong")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn upload_open_when_token_unset() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(tmp.path()).await;
@@ -2988,6 +3061,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ensure_writable_accepts_writable_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(ensure_writable(&dir).is_ok());
+        assert!(
+            !dir.join(".write-probe").exists(),
+            "probe file must be cleaned up"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_writable_rejects_readonly_dir() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Root ignores directory permissions (the Docker test image runs
+        // cargo test as root), so the failure path is untestable there.
+        let marker = tmp.path().join("uid-marker");
+        std::fs::write(&marker, b"").unwrap();
+        if std::fs::metadata(&marker).unwrap().uid() == 0 {
+            eprintln!("skipping ensure_writable_rejects_readonly_dir: running as root");
+            return;
+        }
+
+        let dir = tmp.path().join("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let err = ensure_writable(&dir).unwrap_err().to_string();
+        assert!(err.contains("is not writable"), "unexpected message: {err}");
+        assert!(err.contains("chown -R 1000:1000"), "message must be actionable: {err}");
+
+        // Restore permissions so tempdir cleanup succeeds
+        let mut restore = std::fs::metadata(&dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&dir, restore).unwrap();
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3261,7 +3378,7 @@ mod tests {
         config.upload_token = Some("s3cret".to_string());
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="true""#));
-        assert!(html.contains("Authorization: Bearer"), "quickstart should show the auth header");
+        assert!(html.contains("X-Upload-Token"), "quickstart should show the auth header");
         assert!(!html.contains("s3cret"), "the token itself must never reach the page");
     }
 
@@ -3277,7 +3394,7 @@ mod tests {
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
-        assert!(!html.contains("Authorization: Bearer"));
+        assert!(!html.contains("X-Upload-Token"));
     }
 
     #[test]

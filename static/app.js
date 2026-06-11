@@ -219,7 +219,10 @@ if (uploadForm) {
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', '/?' + params.toString());
       if (token) {
-        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        // X-Upload-Token instead of Authorization: reverse proxies with
+        // auth middleware intercept Authorization and reject the request
+        // with their own non-JSON error page
+        xhr.setRequestHeader('X-Upload-Token', token);
       }
       if (xhr.upload) {
         xhr.upload.onprogress = (event) => {

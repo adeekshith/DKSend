@@ -1,14 +1,27 @@
 # DKSend
 
-DKSend is a temporary file sharing server with a clean CLI + web UX.
+DKSend is a small, self-hostable temporary file sharing server with a clean CLI + web UX. Upload a file, get a short link, and it expires on its own.
+
+- Upload via `curl` or the web UI (drag & drop, paste a screenshot, multiple files, live progress bar)
+- Short share codes, QR codes, SHA-256 integrity hashes, per-upload delete links
+- Optional upload token, total storage cap, per-IP rate limits, access log, admin page
+- Single static binary, SQLite storage, ~4 MB non-root Docker image, no external services
 
 ## Quick start
+
+Docker:
+
+```bash
+docker run --rm -p 3000:3000 -v dksend-data:/data ghcr.io/adeekshith/dksend:latest
+```
+
+From source:
 
 ```bash
 cargo run
 ```
 
-Server listens on `http://localhost:3000`.
+Server listens on `http://localhost:3000`. For a production setup see [Docker Compose](#docker-compose) and [Configuration](#configuration).
 
 ## Upload (CLI)
 
@@ -44,12 +57,15 @@ Plain responses add a third `delete:<url>` line after the share URL and `sha256:
 
 ## Authentication
 
-Uploads are open to anyone by default. Set `UPLOAD_TOKEN` to require a shared token for uploads — recommended for instances reachable from the internet:
+Uploads are open to anyone by default. Set `UPLOAD_TOKEN` to require a shared token for uploads — recommended for instances reachable from the internet. Both header spellings work:
 
 ```bash
 UPLOAD_TOKEN=change-me cargo run
+curl -H "X-Upload-Token: change-me" --upload-file ./hello.txt http://localhost:3000
 curl -H "Authorization: Bearer change-me" --upload-file ./hello.txt http://localhost:3000
 ```
+
+Prefer `X-Upload-Token` when DKSend sits behind a reverse proxy: proxy auth middleware (basic auth, Authelia, oauth2-proxy, ...) often intercepts the `Authorization` header and rejects the request before it reaches DKSend. The web UI uses `X-Upload-Token` for this reason.
 
 The web UI shows an "Upload token" field when a token is configured. Downloads stay public; anyone with a share link can fetch the file.
 
@@ -75,23 +91,24 @@ Note that `UPLOAD_TOKEN` is therefore a full admin credential: anyone holding it
 
 ## Configuration
 
-Environment variables:
+All configuration is via environment variables; every one is optional.
 
-- `HOST` (default: `0.0.0.0`) - bind address
-- `PORT` (default: `3000`) - listen port
-- `BASE_URL` (default: unset) - public URL used in share links, e.g. `https://files.example.com`; when unset, URLs are derived from the `Host` header
-- `DATA_DIR` (default: `./data`) - storage path for database + files
-- `MAX_FILE_SIZE` in bytes (default: 209715200)
-- `DEFAULT_EXPIRY` (default: `1d`)
-- `MAX_EXPIRY` (default: `7d`)
-- `BRAND_TITLE` (default: `Send Files`) - HTML title and header text
-- `BRAND_DESCRIPTION` (default: empty) - optional tagline shown below the heading
-- `UPLOAD_TOKEN` (default: unset = open uploads) - require `Authorization: Bearer <token>` for uploads
-- `MAX_TOTAL_STORAGE` in bytes (default: unset = unlimited) - cap on total stored bytes across all uploads
-- `RATE_LIMIT_UPLOADS_PER_MIN` (default: 20, 0 disables) - per-IP upload requests per minute
-- `RATE_LIMIT_LOOKUPS_PER_MIN` (default: 60, 0 disables) - per-IP download/page requests per minute
-- `CLEANUP_INTERVAL` (default: `1h`, minimum `1m`) - how often expired uploads are purged
-- `ACCESS_LOG` (default: on; `0`/`false`/`off` disables) - per-request log lines on stderr
+| Variable | Default | Description |
+|---|---|---|
+| `UPLOAD_TOKEN` | unset (open uploads) | Require `Authorization: Bearer <token>` for uploads; also enables `/admin`. Recommended for internet-facing instances. |
+| `BASE_URL` | unset | Public URL used in share links, e.g. `https://files.example.com`. When unset, URLs are derived from the `Host` header. |
+| `MAX_FILE_SIZE` | `209715200` (200 MB) | Per-upload size limit in bytes. |
+| `MAX_TOTAL_STORAGE` | unset (unlimited) | Cap on total stored bytes across all uploads; uploads beyond it get HTTP 507. |
+| `DEFAULT_EXPIRY` | `1d` | Lifetime applied when the uploader doesn't pick one. |
+| `MAX_EXPIRY` | `7d` | Longest allowed lifetime. |
+| `RATE_LIMIT_UPLOADS_PER_MIN` | `20` (`0` disables) | Per-IP upload requests per minute. |
+| `RATE_LIMIT_LOOKUPS_PER_MIN` | `60` (`0` disables) | Per-IP download/page requests per minute (slows share-code guessing). |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Storage path for the database and files. |
+| `HOST` / `PORT` | `0.0.0.0` / `3000` | Bind address and listen port. |
+| `CLEANUP_INTERVAL` | `1h` (minimum `1m`) | How often expired uploads are purged. |
+| `ACCESS_LOG` | on (`0`/`false`/`off` disables) | Per-request log lines on stderr. |
+| `BRAND_TITLE` | `Send Files` | HTML title and page heading. |
+| `BRAND_DESCRIPTION` | empty | Optional tagline below the heading. |
 
 Durations use `30m`, `1h`, `2d`.
 
@@ -128,7 +145,7 @@ The container runs as an unprivileged user (uid 1000). When bind-mounting a data
 mkdir -p data && sudo chown -R 1000:1000 data
 ```
 
-**Upgrading from an older (root) image:** an existing `./data` is likely root-owned, so the new image crash-loops with `DKSend error` in `docker logs` until you run the `chown` above (or temporarily run with `--user 0:0`).
+**Upgrading from an older (root) image:** an existing data directory is likely root-owned, so the new image refuses to start — `docker logs` shows `DKSend error: data directory /data/files is not writable by the server process` with the fix spelled out. Run the one-time `chown` above (or temporarily run with `--user 0:0` while migrating).
 
 Build:
 
@@ -157,11 +174,11 @@ A production example lives in [docker-compose.yml](docker-compose.yml):
 docker compose up -d
 ```
 
-Uncomment `BASE_URL`, `UPLOAD_TOKEN`, and `MAX_TOTAL_STORAGE` in the file to fit your setup.
+All common settings are documented inline as comments — uncomment what you need. Remember to pre-create the data directory writable by uid 1000 (see above).
 
 ## Deploy from GHCR
 
-The GitHub Actions workflow publishes multi-arch images to:
+The GitHub Actions workflow publishes images (currently linux/amd64) to:
 
 `ghcr.io/adeekshith/dksend`
 
@@ -172,18 +189,22 @@ docker pull ghcr.io/adeekshith/dksend:latest
 docker run --rm -p 3000:3000 -v $(pwd)/data:/data ghcr.io/adeekshith/dksend:latest
 ```
 
-Example Docker run with all environment variables:
+Example with the settings most internet-facing instances want:
 
 ```bash
-docker run --rm -p 3000:3000 -v $(pwd)/data:/data \\
-  -e DATA_DIR=/data \\
-  -e MAX_FILE_SIZE=209715200 \\
-  -e DEFAULT_EXPIRY=24h \\
-  -e MAX_EXPIRY=7d \\
-  -e BRAND_TITLE="My Share" \\
-  -e BRAND_DESCRIPTION="Fast, friendly file drops." \\
+docker run --rm -p 3000:3000 -v $(pwd)/data:/data \
+  -e BASE_URL=https://files.example.com \
+  -e UPLOAD_TOKEN=change-me \
+  -e MAX_FILE_SIZE=209715200 \
+  -e MAX_TOTAL_STORAGE=10737418240 \
+  -e DEFAULT_EXPIRY=1d \
+  -e MAX_EXPIRY=7d \
+  -e BRAND_TITLE="My Share" \
+  -e BRAND_DESCRIPTION="Fast, friendly file drops." \
   ghcr.io/adeekshith/dksend:latest
 ```
+
+`DATA_DIR` defaults to `/data` inside the image, so only the volume mount is needed. See [Configuration](#configuration) for the full list.
 
 ## Testing
 
@@ -240,7 +261,7 @@ DATA_DIR=/tmp/dksend-test cd tests/e2e && npx playwright test
 
 ## Behavior notes
 
-- Expiry is clamped to a minimum of 5 minutes and a maximum of 7 days.
+- Expiry is clamped to a minimum of 5 minutes and a maximum of `MAX_EXPIRY` (default 7 days).
 - Filenames in URLs are cosmetic; mismatches redirect to the canonical name.
 - Expired uploads return HTTP 410.
 
