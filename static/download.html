@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{title}}</title>
-    <link rel="stylesheet" href="/static/app.css?v=1">
+    <link rel="stylesheet" href="/static/app.css?v=8">
   </head>
   <body>
     <main class="shell">
@@ -21,6 +21,7 @@
         <div class="actions">
           <a class="primary" href="{{download_url}}">Download</a>
         </div>
+        <div class="qr-block" data-qr="{{download_page_url}}"></div>
         <div class="link-list">
           <div class="link-row">
             <span class="row-label">Page</span>
@@ -40,6 +41,7 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=1" defer></script>
+    <script src="/static/qr.js?v=1" defer></script>
+    <script src="/static/app.js?v=9" defer></script>
   </body>
 </html>

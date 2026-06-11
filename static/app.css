@@ -332,6 +332,28 @@ button:hover,
   font-weight: 600;
 }
 
+.qr-block {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+/* Hide the tile entirely if qr.js failed to load */
+.qr-block:empty {
+  display: none;
+}
+
+/* Always black-on-white: inverted QR codes scan unreliably, so no
+   dark-mode treatment here */
+.qr-block svg {
+  width: 148px;
+  height: 148px;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+}
+
 .upload-progress {
   margin-top: 4px;
   text-align: center;

@@ -55,7 +55,7 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 
 ## Download
 
-- Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
+- Web page: `GET /{code}/{filename}` — shows filename, size, expiry, a QR code of the share link (handy for phone-to-laptop transfers), and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`. The upload result panel shows the same QR code.
 - Raw file: `GET /raw/{code}/{filename}` — responses carry the exact `Content-Length`, so browsers and `curl` show real download progress.
 
 ## Delete
@@ -246,3 +246,7 @@ DATA_DIR=/tmp/dksend-test cd tests/e2e && npx playwright test
 ## Database
 
 SQLite with migrations in `migrations/`. Metadata is stored in `uploads.db` under `DATA_DIR`.
+
+## Vendored assets
+
+- `static/qr.js` — [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) v2.0.4 by Kazuhiko Arase, MIT license (header retained in the file).

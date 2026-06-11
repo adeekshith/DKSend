@@ -34,6 +34,28 @@ const setButtonState = (button, ok) => {
   }, 1500);
 };
 
+// Renders the share URL as an SVG string via the vendored qrcode-generator
+// (static/qr.js). Returns '' when the library failed to load.
+const qrSvgTag = (text) => {
+  if (typeof window.qrcode !== 'function' || !text) {
+    return '';
+  }
+  try {
+    const qr = window.qrcode(0, 'M'); // type 0 = auto-size to the data
+    qr.addData(text);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+  } catch (_) {
+    return '';
+  }
+};
+
+// Download page: fill any [data-qr] placeholders with a QR of their URL
+const qrHosts = document.querySelectorAll?.('[data-qr]') || [];
+for (const el of qrHosts) {
+  el.innerHTML = qrSvgTag(el.getAttribute('data-qr'));
+}
+
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-copy]');
   if (!button) {
@@ -209,6 +231,7 @@ if (uploadForm) {
         <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
         <button type="button" data-reset>Upload another file</button>
       </div>
+      <div class="qr-block">${qrSvgTag(data.download_page_url)}</div>
       <div class="link-list">
         <div class="link-row">
           <span class="row-label">Page</span>

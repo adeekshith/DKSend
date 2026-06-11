@@ -492,6 +492,37 @@ describe('drag and drop upload', () => {
     assert.ok(dom2.resultDiv.innerHTML.includes('Network error'));
   });
 
+  it('embeds a QR code for the download page url in the result block', async () => {
+    const dom2 = makeDom();
+    let receivedText = null;
+    const fakeQrcode = () => ({
+      addData(text) { receivedText = text; },
+      make() {},
+      createSvgTag: () => '<svg data-fake-qr="1"></svg>',
+    });
+    loadApp(dom2, { window: { qrcode: fakeQrcode } });
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('qr-block'));
+    assert.ok(dom2.resultDiv.innerHTML.includes('data-fake-qr'));
+    assert.equal(receivedText, 'http://localhost/abc', 'QR encodes the download page url');
+  });
+
+  it('renders an empty QR block when the qr library is missing', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom.resultDiv.innerHTML.includes('class="qr-block"'), 'block present');
+    assert.ok(!dom.resultDiv.innerHTML.includes('<svg'), 'no svg without the library');
+  });
+
   it('sends Authorization header when the token field is filled', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -561,5 +592,18 @@ describe('upload.html template', () => {
   it('exposes the configured max file size on the form', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
+  });
+
+  it('loads the QR library before app.js', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.indexOf('/static/qr.js') !== -1);
+    assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
+  });
+
+  it('download page has a QR placeholder and the QR library', () => {
+    const html = readFileSync(new URL('./download.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('data-qr="{{download_page_url}}"'));
+    assert.ok(html.indexOf('/static/qr.js') !== -1);
+    assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
   });
 });
