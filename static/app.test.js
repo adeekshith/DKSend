@@ -163,7 +163,8 @@ function makeFakeXhrClass(getResponse, manual) {
     respond(reply) {
       const r = reply || getResponse();
       this.status = r.status ?? 200;
-      this.responseText = JSON.stringify(r.json);
+      // r.raw simulates a non-JSON reply (e.g. a reverse proxy error page)
+      this.responseText = r.raw !== undefined ? r.raw : JSON.stringify(r.json);
       this.onload?.();
     }
     fail() {
@@ -476,6 +477,23 @@ describe('drag and drop upload', () => {
     await new Promise((r) => setTimeout(r, 10));
     assert.ok(dom2.resultDiv.innerHTML.includes('File exceeds the configured size limit.'));
     assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible on failure');
+  });
+
+  it('shows "Unexpected server response" when the reply is not JSON', async () => {
+    // What a reverse proxy's auth middleware produces when it intercepts
+    // the request: its own HTML error page instead of DKSend's JSON
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [{ status: 401, raw: '<html><body>401 Unauthorized</body></html>' }],
+    });
+    const file = { name: 'f.txt', size: 10 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Unexpected server response'));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible');
   });
 
   it('shows a network error message when the request fails', async () => {

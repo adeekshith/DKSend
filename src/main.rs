@@ -599,7 +599,7 @@ async fn handle_upload(
             response_mode,
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            "This server requires an upload token. Send 'Authorization: Bearer <token>'.",
+            "This server requires an upload token. Send 'X-Upload-Token: <token>' or 'Authorization: Bearer <token>'.",
         );
     }
 
