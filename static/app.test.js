@@ -546,6 +546,146 @@ describe('drag and drop upload', () => {
     assert.equal(opts.headers['Authorization'], undefined);
   });
 
+  function dispatchPaste(targetDom, files, spy = {}) {
+    const event = {
+      type: 'paste',
+      clipboardData: { files },
+      preventDefault() { spy.prevented = true; },
+    };
+    for (const handler of targetDom.document._listeners.paste || []) {
+      handler(event);
+    }
+    return spy;
+  }
+
+  it('pasting a file selects it and updates the drop label', () => {
+    const file = { name: 'ignored.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    assert.ok(dom.spanEl.textContent.startsWith('pasted-'), `label is ${dom.spanEl.textContent}`);
+    assert.ok(dom.spanEl.textContent.endsWith('.png'));
+  });
+
+  it('pasted image upload uses a generated mime-derived filename', async () => {
+    const file = { name: 'ignored.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [url] = ctx.getLastFetch();
+    assert.ok(url.includes('name=pasted-'), `url is ${url}`);
+    assert.ok(url.includes('.png'));
+  });
+
+  it('text paste does not steal the selection', () => {
+    const spy = dispatchPaste(dom, [], {});
+    assert.notEqual(spy.prevented, true, 'preventDefault must not run for text pastes');
+    assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file');
+  });
+
+  it('selecting multiple files updates the label to a count', () => {
+    dom.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.spanEl.textContent, '2 files selected');
+  });
+
+  it('disables the filename override for multiple files and re-enables for one', () => {
+    dom.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.filenameInput.disabled, true);
+
+    dom.fileInput.files = [{ name: 'solo.txt', size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.filenameInput.disabled, false);
+  });
+
+  it('uploads multiple files sequentially', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    dom2.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(ctx2.instances.length, 1, 'second upload must wait for the first');
+    assert.ok(ctx2.instances[0].url.includes('name=a.txt'));
+
+    ctx2.instances[0].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx2.instances.length, 2, 'second upload starts after the first finishes');
+    assert.ok(ctx2.instances[1].url.includes('name=b.txt'));
+
+    ctx2.instances[1].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    const cards = dom2.resultDiv.innerHTML.match(/class="file-card"/g) || [];
+    assert.equal(cards.length, 2, 'one card per file');
+    assert.ok(dom2.resultDiv.innerHTML.includes('<h3>Uploaded</h3>'));
+  });
+
+  it('applies the filename override only to a single file', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    dom2.filenameInput.value = 'custom.txt';
+    dom2.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(ctx2.instances[0].url.includes('name=a.txt'), 'per-file name kept for batches');
+    assert.ok(!ctx2.instances[0].url.includes('custom.txt'));
+    ctx2.instances[0].respond();
+  });
+
+  it('continues after a per-file failure and renders an error card', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+        { status: 201, json: SUCCESS_JSON },
+      ],
+    });
+    dom2.fileInput.files = [
+      { name: 'fails.bin', size: 10 },
+      { name: 'works.txt', size: 10 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const html = dom2.resultDiv.innerHTML;
+    assert.ok(html.includes('file-card-error'), 'failed file gets an error card');
+    assert.ok(html.includes('too big'));
+    assert.ok(html.includes('Open download page'), 'successful file still gets its card');
+    assert.ok(dom2.uploadForm.classList.contains('hidden'), 'form hides when at least one succeeded');
+  });
+
+  it('keeps the form visible when every file fails', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+      ],
+    });
+    dom2.fileInput.files = [
+      { name: 'a.bin', size: 10 },
+      { name: 'b.bin', size: 10 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'));
+    assert.ok(!dom2.resultDiv.innerHTML.includes('<h3>Uploaded</h3>'));
+  });
+
   it('includes expiry in upload request', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -592,6 +732,11 @@ describe('upload.html template', () => {
   it('exposes the configured max file size on the form', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
+  });
+
+  it('file input allows multiple files', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(/<input[^>]*type="file"[^>]*multiple/.test(html));
   });
 
   it('loads the QR library before app.js', () => {

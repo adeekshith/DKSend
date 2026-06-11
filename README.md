@@ -97,6 +97,12 @@ Durations use `30m`, `1h`, `2d`.
 
 The web UI follows this configuration: the client-side size check uses `MAX_FILE_SIZE`, and the expiry dropdown is rendered from `DEFAULT_EXPIRY`/`MAX_EXPIRY`.
 
+## Web UI
+
+- Uploads show a live progress bar with transferred/total bytes.
+- Select or drop multiple files: they upload one after another, each getting its own result card with links and QR code. The filename override applies only when a single file is selected.
+- Paste a file or screenshot (Ctrl/Cmd+V) anywhere on the upload page to select it; pasted files get a generated name like `pasted-2026-06-10-181203.png`. Pasting text into the token or filename fields works as usual.
+
 ## Access log
 
 One line per request is written to stderr (where `docker logs` collects it):

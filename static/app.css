@@ -332,6 +332,22 @@ button:hover,
   font-weight: 600;
 }
 
+.file-card {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--stroke);
+  text-align: center;
+}
+
+.file-card:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.file-card-error p {
+  margin: 6px 0;
+}
+
 .qr-block {
   display: flex;
   justify-content: center;
