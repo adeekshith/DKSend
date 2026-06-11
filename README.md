@@ -56,7 +56,7 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 ## Download
 
 - Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
-- Raw file: `GET /raw/{code}/{filename}`
+- Raw file: `GET /raw/{code}/{filename}` — responses carry the exact `Content-Length`, so browsers and `curl` show real download progress.
 
 ## Delete
 

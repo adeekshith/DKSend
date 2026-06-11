@@ -883,6 +883,12 @@ async fn raw_download(
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
     let mut response = body.into_response();
+    // Streamed bodies have no implicit length; set it from the record so
+    // clients can show download progress instead of an unknown size.
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from(record.size_bytes),
+    );
     let filename = urlencoding::encode(&record.original_filename);
     let content_disposition = format!("attachment; filename=\"{}\"", filename);
     response.headers_mut().insert(
@@ -1869,6 +1875,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(download_resp.status(), StatusCode::OK);
+        let body = download_resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), content.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn raw_download_has_content_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let content = "download me"; // 11 bytes
+        let upload_resp = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=sized.txt")
+                    .header("content-length", content.len().to_string())
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = upload_resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        let download_resp = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/sized.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        assert_eq!(
+            download_resp.headers().get(header::CONTENT_LENGTH).unwrap(),
+            &content.len().to_string()
+        );
         let body = download_resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), content.as_bytes());
     }
