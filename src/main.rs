@@ -54,6 +54,54 @@ struct AppConfig {
     port: u16,
     base_url: Option<String>,
     cleanup_interval: Duration,
+    access_log: bool,
+}
+
+fn parse_bool(value: Option<&str>, default: bool) -> bool {
+    match value {
+        None => default,
+        Some(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                default
+            } else {
+                !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+            }
+        }
+    }
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    // ?name= is user input; a control char here is a log-injection vector
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .collect()
+}
+
+fn access_log_line(event: &str, fields: &[(&str, &str)]) -> String {
+    let mut line = format!(
+        "{} event={}",
+        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        event
+    );
+    for (key, value) in fields {
+        let clean = sanitize_log_value(value);
+        if clean.is_empty() || clean.contains(' ') || clean.contains('"') || clean.contains('=') {
+            let escaped = clean.replace('\\', "\\\\").replace('"', "\\\"");
+            line.push_str(&format!(" {key}=\"{escaped}\""));
+        } else {
+            line.push_str(&format!(" {key}={clean}"));
+        }
+    }
+    line
+}
+
+fn log_access(config: &AppConfig, event: &str, fields: &[(&str, &str)]) {
+    if !config.access_log {
+        return;
+    }
+    eprintln!("{}", access_log_line(event, fields));
 }
 
 struct Bucket {
@@ -401,6 +449,8 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         .unwrap_or(Duration::from_secs(60 * 60))
         .max(Duration::from_secs(60));
 
+    let access_log = parse_bool(env::var("ACCESS_LOG").ok().as_deref(), true);
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -420,6 +470,7 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         port,
         base_url,
         cleanup_interval,
+        access_log,
     })
 }
 
@@ -488,10 +539,11 @@ async fn handle_upload(
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
 
     if let Some(limiter) = &state.upload_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "upload", &[("ip", &client), ("status", "429")]);
             return rate_limited(upload_error(
                 response_mode,
                 StatusCode::TOO_MANY_REQUESTS,
@@ -502,6 +554,7 @@ async fn handle_upload(
     }
 
     if !upload_authorized(&headers, &state.config) {
+        log_access(&state.config, "upload", &[("ip", &client), ("status", "401")]);
         return upload_error(
             response_mode,
             StatusCode::UNAUTHORIZED,
@@ -572,6 +625,7 @@ async fn handle_upload(
             }
         };
         if used.saturating_add(content_length) > cap {
+            log_access(&state.config, "upload", &[("ip", &client), ("status", "507")]);
             return upload_error(
                 response_mode,
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -699,6 +753,18 @@ async fn handle_upload(
         );
     }
 
+    log_access(
+        &state.config,
+        "upload",
+        &[
+            ("ip", &client),
+            ("status", "201"),
+            ("code", &code),
+            ("size", &size_written.to_string()),
+            ("file", &filename),
+        ],
+    );
+
     let base_url = resolve_base_url(&state.config, &headers);
     let encoded_filename = urlencoding::encode(&filename);
     let download_page_url = format!("{base_url}/{code}");
@@ -778,9 +844,11 @@ async fn download_page(
     code: String,
     filename: Option<String>,
 ) -> Response {
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+
     if let Some(limiter) = &state.lookup_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "page", &[("ip", &client), ("status", "429")]);
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
@@ -793,6 +861,11 @@ async fn download_page(
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => {
+            log_access(
+                &state.config,
+                "page",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist.",
@@ -811,6 +884,11 @@ async fn download_page(
     };
 
     if record.expires_at <= Utc::now() {
+        log_access(
+            &state.config,
+            "page",
+            &[("ip", &client), ("status", "410"), ("code", &code)],
+        );
         return html_error(
             StatusCode::GONE,
             "This file does not exist or is no longer available.",
@@ -825,9 +903,15 @@ async fn download_page(
     let canonical_url = format!("{base_url}/{code}/{encoded}");
 
     if filename.as_deref() != Some(&canonical_filename) {
+        // No log line here: the redirect's follow-up GET logs the page view
         return Redirect::temporary(&canonical_url).into_response();
     }
 
+    log_access(
+        &state.config,
+        "page",
+        &[("ip", &client), ("status", "200"), ("code", &code)],
+    );
     Html(render_download_page(&record, &base_url, &state.templates, &state.config)).into_response()
 }
 
@@ -855,9 +939,11 @@ async fn raw_download(
     headers: HeaderMap,
     code: String,
 ) -> Response {
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+
     if let Some(limiter) = &state.lookup_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "download", &[("ip", &client), ("status", "429")]);
             return rate_limited(plain_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
@@ -867,19 +953,43 @@ async fn raw_download(
 
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
-        Ok(None) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
+        Ok(None) => {
+            log_access(
+                &state.config,
+                "download",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
+            return plain_error(StatusCode::NOT_FOUND, "Not found.");
+        }
         Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "Server error."),
     };
 
     if record.expires_at <= Utc::now() {
+        log_access(
+            &state.config,
+            "download",
+            &[("ip", &client), ("status", "410"), ("code", &code)],
+        );
         return plain_error(StatusCode::GONE, "This file does not exist or is no longer available.");
     }
 
     let file = match File::open(&record.stored_path).await {
         Ok(file) => file,
-        Err(_) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
+        Err(_) => {
+            log_access(
+                &state.config,
+                "download",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
+            return plain_error(StatusCode::NOT_FOUND, "Not found.");
+        }
     };
 
+    log_access(
+        &state.config,
+        "download",
+        &[("ip", &client), ("status", "200"), ("code", &code)],
+    );
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
     let mut response = body.into_response();
@@ -942,13 +1052,33 @@ async fn perform_delete(
     Ok(DeleteOutcome::Deleted)
 }
 
+// Maps a delete attempt to (http status label, outcome label) for the access log
+fn delete_outcome_parts(outcome: &Result<DeleteOutcome, anyhow::Error>) -> (&'static str, &'static str) {
+    match outcome {
+        Ok(DeleteOutcome::Deleted) => ("200", "deleted"),
+        Ok(DeleteOutcome::NotFound) => ("404", "not_found"),
+        Ok(DeleteOutcome::Forbidden) => ("403", "forbidden"),
+        Err(_) => ("500", "error"),
+    }
+}
+
 async fn delete_api(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     Query(params): Query<DeleteQuery>,
 ) -> Response {
     let token = params.token.unwrap_or_default();
-    match perform_delete(&state, &code, &token).await {
+    let outcome = perform_delete(&state, &code, &token).await;
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let (status, label) = delete_outcome_parts(&outcome);
+    log_access(
+        &state.config,
+        "delete",
+        &[("ip", &client), ("status", status), ("code", &code), ("outcome", label)],
+    );
+    match outcome {
         Ok(DeleteOutcome::Deleted) => json_response(
             StatusCode::OK,
             &serde_json::json!({ "success": true, "code": code }),
@@ -1013,10 +1143,20 @@ async fn delete_confirm_page(
 
 async fn delete_form_action(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<DeleteForm>,
 ) -> Response {
-    match perform_delete(&state, &code, &form.token).await {
+    let outcome = perform_delete(&state, &code, &form.token).await;
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let (status, label) = delete_outcome_parts(&outcome);
+    log_access(
+        &state.config,
+        "delete",
+        &[("ip", &client), ("status", status), ("code", &code), ("outcome", label)],
+    );
+    match outcome {
         Ok(DeleteOutcome::Deleted) => html_error(
             StatusCode::OK,
             "File deleted.",
@@ -1497,6 +1637,8 @@ mod tests {
             port: 3000,
             base_url: None,
             cleanup_interval: Duration::from_secs(3600),
+            // Keep the test suite's stderr quiet
+            access_log: false,
         }
     }
 
@@ -2355,6 +2497,47 @@ mod tests {
             assert!(is_reserved_code(code), "{code} must be reserved");
         }
         assert!(!is_reserved_code("abc12"));
+    }
+
+    #[test]
+    fn access_log_line_format_basic() {
+        let line = access_log_line(
+            "upload",
+            &[("ip", "1.2.3.4"), ("status", "201"), ("code", "ab3x9")],
+        );
+        let (timestamp, rest) = line.split_once(' ').unwrap();
+        assert_eq!(timestamp.len(), 20, "expected 2026-06-10T12:00:00Z form, got {timestamp}");
+        assert!(timestamp.ends_with('Z') && timestamp.contains('T'));
+        assert_eq!(rest, "event=upload ip=1.2.3.4 status=201 code=ab3x9");
+    }
+
+    #[test]
+    fn access_log_line_quotes_and_escapes_values() {
+        let line = access_log_line("upload", &[("file", "report q2.pdf"), ("note", "a\"b")]);
+        assert!(line.contains(r#"file="report q2.pdf""#));
+        assert!(line.contains(r#"note="a\"b""#));
+    }
+
+    #[test]
+    fn access_log_line_strips_control_chars() {
+        let line = access_log_line("upload", &[("file", "evil\nevent=fake\x1b[31m")]);
+        assert!(!line.contains('\n'), "newline must not survive: {line}");
+        assert!(!line.contains('\x1b'));
+        assert!(line.contains("evil?event=fake"));
+    }
+
+    #[test]
+    fn parse_bool_values() {
+        assert!(parse_bool(None, true));
+        assert!(!parse_bool(None, false));
+        for falsy in ["0", "false", "OFF", "no", " False "] {
+            assert!(!parse_bool(Some(falsy), true), "{falsy} should disable");
+        }
+        for truthy in ["1", "true", "on", "yes", "anything"] {
+            assert!(parse_bool(Some(truthy), false), "{truthy} should enable");
+        }
+        assert!(parse_bool(Some(""), true));
+        assert!(!parse_bool(Some(""), false));
     }
 
     #[test]

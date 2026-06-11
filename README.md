@@ -85,8 +85,22 @@ Environment variables:
 - `RATE_LIMIT_UPLOADS_PER_MIN` (default: 20, 0 disables) - per-IP upload requests per minute
 - `RATE_LIMIT_LOOKUPS_PER_MIN` (default: 60, 0 disables) - per-IP download/page requests per minute
 - `CLEANUP_INTERVAL` (default: `1h`, minimum `1m`) - how often expired uploads are purged
+- `ACCESS_LOG` (default: on; `0`/`false`/`off` disables) - per-request log lines on stderr
 
 Durations use `30m`, `1h`, `2d`.
+
+## Access log
+
+One line per request is written to stderr (where `docker logs` collects it):
+
+```
+2026-06-10T18:21:03Z event=upload ip=1.2.3.4 status=201 code=ab3x9 size=11 file=report.pdf
+2026-06-10T18:22:41Z event=page ip=5.6.7.8 status=200 code=ab3x9
+2026-06-10T18:22:44Z event=download ip=5.6.7.8 status=200 code=ab3x9
+2026-06-10T18:25:02Z event=delete ip=1.2.3.4 status=200 code=ab3x9 outcome=deleted
+```
+
+Events: `upload` (201/401/429/507), `page` and `download` (200/404/410/429 — 404s are what share-code guessing looks like), `delete` (with `outcome=`). Lines are grep-friendly: `grep 'status=404'`, `grep 'code=ab3x9'`. Set `ACCESS_LOG=0` to disable.
 
 ## Health check
 
