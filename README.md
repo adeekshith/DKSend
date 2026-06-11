@@ -67,6 +67,12 @@ Every upload gets its own secret delete token, returned as `delete_token`/`delet
 
 Deleting removes the file and its metadata immediately. A second delete returns 404. Uploads created before this feature have no delete token and can only expire.
 
+## Admin
+
+When `UPLOAD_TOKEN` is set, `GET /admin` shows a token form; entering the token lists all active uploads (code, filename, size, upload time, expiry) with a per-file Delete button. Without `UPLOAD_TOKEN` the admin endpoints return 404.
+
+Note that `UPLOAD_TOKEN` is therefore a full admin credential: anyone holding it can list and delete every upload, including ones created before delete tokens existed. Token attempts are slowed by the lookup rate limit, so a busy admin session can hit HTTP 429 — raise `RATE_LIMIT_LOOKUPS_PER_MIN` if that bites.
+
 ## Configuration
 
 Environment variables:

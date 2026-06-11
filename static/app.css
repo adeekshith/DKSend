@@ -332,6 +332,65 @@ button:hover,
   font-weight: 600;
 }
 
+.admin-card {
+  text-align: left;
+  overflow-x: auto;
+}
+
+.admin-login {
+  max-width: 360px;
+  margin: 0 auto;
+}
+
+.admin-empty {
+  text-align: center;
+  color: var(--muted);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--stroke);
+  text-align: left;
+}
+
+.admin-table th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.admin-table td form {
+  display: inline;
+}
+
+.admin-table td form button {
+  margin-top: 0;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--card);
+  border: 1px solid var(--stroke);
+  color: var(--ink);
+}
+
+.admin-table td form button:hover {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+  background: var(--card);
+}
+
+.admin-table a {
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
 .result h3,
 .file-meta {
   text-align: center;
