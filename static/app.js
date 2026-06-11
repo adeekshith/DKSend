@@ -126,8 +126,21 @@ if (uploadForm) {
     }
   });
 
-  const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
+  // Server injects its real limit via data-max-file-size; the constant is
+  // only a fallback if the attribute is missing
+  const MAX_FILE_SIZE = Number(uploadForm.dataset.maxFileSize) || 200 * 1024 * 1024;
   const submitButton = uploadForm.querySelector('button[type="submit"]');
+
+  const humanSize = (bytes) => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = bytes;
+    let idx = 0;
+    while (size >= 1024 && idx < units.length - 1) {
+      size /= 1024;
+      idx += 1;
+    }
+    return idx === 0 ? `${bytes} ${units[idx]}` : `${size.toFixed(1)} ${units[idx]}`;
+  };
 
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -139,7 +152,7 @@ if (uploadForm) {
     if (file.size > MAX_FILE_SIZE) {
       if (result) {
         result.classList.remove('hidden');
-        result.innerHTML = `<p class="warn">File is too large (${Math.round(file.size / 1024 / 1024)} MB). Maximum size is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB.</p>`;
+        result.innerHTML = `<p class="warn">File is too large (${humanSize(file.size)}). Maximum size is ${humanSize(MAX_FILE_SIZE)}.</p>`;
       }
       return;
     }

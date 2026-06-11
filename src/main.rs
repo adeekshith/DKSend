@@ -1710,6 +1710,33 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
     output
 }
 
+// The expiry dropdown mirrors server config: the empty value means "let the
+// server apply DEFAULT_EXPIRY", followed by standard choices that fit within
+// the configured bounds.
+fn expiry_options_html(config: &AppConfig) -> String {
+    let candidates = [
+        Duration::from_secs(60 * 30),
+        Duration::from_secs(60 * 60),
+        Duration::from_secs(60 * 60 * 24),
+        Duration::from_secs(60 * 60 * 24 * 7),
+    ];
+    let mut html = format!(
+        r#"<option value="">{} (default)</option>"#,
+        duration_short(config.default_expiry)
+    );
+    for candidate in candidates {
+        if candidate < config.min_expiry
+            || candidate > config.max_expiry
+            || candidate == config.default_expiry
+        {
+            continue;
+        }
+        let label = duration_short(candidate);
+        html.push_str(&format!(r#"<option value="{label}">{label}</option>"#));
+    }
+    html
+}
+
 fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
@@ -1729,6 +1756,8 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
             ("{{site_url}}", base_url.to_string()),
             ("{{auth_required}}", auth_required.to_string()),
             ("{{auth_snippet}}", auth_snippet),
+            ("{{max_file_size}}", config.max_file_size.to_string()),
+            ("{{expiry_options}}", expiry_options_html(config)),
         ],
     )
 }
@@ -3249,5 +3278,45 @@ mod tests {
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
         assert!(!html.contains("Authorization: Bearer"));
+    }
+
+    #[test]
+    fn upload_page_embeds_max_file_size() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+            delete: String::new(),
+            admin: String::new(),
+        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.max_file_size = 1234;
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-max-file-size="1234""#));
+    }
+
+    #[test]
+    fn expiry_options_respect_max_expiry() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.default_expiry = Duration::from_secs(3600);
+        config.max_expiry = Duration::from_secs(3600);
+        let html = expiry_options_html(&config);
+        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
+        assert!(html.contains(r#"value="30m""#));
+        assert!(!html.contains("1d"), "options above max_expiry must be dropped: {html}");
+        assert!(!html.contains("7d"));
+        assert!(!html.contains(r#"value="1h""#), "default must not be duplicated");
+    }
+
+    #[test]
+    fn expiry_options_skip_default_duplicate() {
+        // test_config: default 1h, bounds 5m..1d
+        let config = test_config(PathBuf::from("./data"));
+        let html = expiry_options_html(&config);
+        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
+        assert!(html.contains(r#"value="30m""#));
+        assert!(html.contains(r#"value="1d""#));
+        assert!(!html.contains(r#"value="1h""#));
+        assert!(!html.contains("7d"));
     }
 }

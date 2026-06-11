@@ -95,6 +95,8 @@ Environment variables:
 
 Durations use `30m`, `1h`, `2d`.
 
+The web UI follows this configuration: the client-side size check uses `MAX_FILE_SIZE`, and the expiry dropdown is rendered from `DEFAULT_EXPIRY`/`MAX_EXPIRY`.
+
 ## Access log
 
 One line per request is written to stderr (where `docker logs` collects it):

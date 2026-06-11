@@ -255,6 +255,31 @@ describe('drag and drop upload', () => {
     assert.ok(dom.resultDiv.innerHTML.includes('too large'));
   });
 
+  it('reads max file size from the data-max-file-size attribute', async () => {
+    const dom2 = makeDom();
+    dom2.uploadForm.dataset.maxFileSize = '1024';
+    const ctx2 = loadApp(dom2);
+    const file = { name: 'small-but-over.bin', size: 2048 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx2.getLastFetch(), null, 'upload must be blocked by the injected limit');
+    assert.ok(dom2.resultDiv.innerHTML.includes('too large'));
+    assert.ok(dom2.resultDiv.innerHTML.includes('1.0 KB'), 'limit should be human-formatted');
+  });
+
+  it('falls back to 200 MB when the attribute is missing', async () => {
+    const okFile = { name: 'ok.bin', size: 199 * 1024 * 1024 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [okFile] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.notEqual(ctx.getLastFetch(), null, '199 MB should pass the default limit');
+  });
+
   it('disables submit button during upload', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -415,5 +440,16 @@ describe('upload.html template', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
     assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
+  });
+
+  it('injects expiry options from the server', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('{{expiry_options}}'), 'expiry options come from server config');
+    assert.ok(!html.includes('value="30m"'), 'no hardcoded expiry options');
+  });
+
+  it('exposes the configured max file size on the form', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
   });
 });
