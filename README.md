@@ -114,6 +114,14 @@ Events: `upload` (201/401/429/507), `page` and `download` (200/404/410/429 — 4
 
 ## Docker / Podman
 
+The container runs as an unprivileged user (uid 1000). When bind-mounting a data directory, make sure uid 1000 can write to it:
+
+```bash
+mkdir -p data && sudo chown -R 1000:1000 data
+```
+
+**Upgrading from an older (root) image:** an existing `./data` is likely root-owned, so the new image crash-loops with `DKSend error` in `docker logs` until you run the `chown` above (or temporarily run with `--user 0:0`).
+
 Build:
 
 ```bash
