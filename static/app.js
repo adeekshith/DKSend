@@ -34,6 +34,28 @@ const setButtonState = (button, ok) => {
   }, 1500);
 };
 
+// Renders the share URL as an SVG string via the vendored qrcode-generator
+// (static/qr.js). Returns '' when the library failed to load.
+const qrSvgTag = (text) => {
+  if (typeof window.qrcode !== 'function' || !text) {
+    return '';
+  }
+  try {
+    const qr = window.qrcode(0, 'M'); // type 0 = auto-size to the data
+    qr.addData(text);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+  } catch (_) {
+    return '';
+  }
+};
+
+// Download page: fill any [data-qr] placeholders with a QR of their URL
+const qrHosts = document.querySelectorAll?.('[data-qr]') || [];
+for (const el of qrHosts) {
+  el.innerHTML = qrSvgTag(el.getAttribute('data-qr'));
+}
+
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-copy]');
   if (!button) {
@@ -52,16 +74,44 @@ if (uploadForm) {
   const filenameInput = document.getElementById('filename');
   const expirySelect = document.getElementById('expiry');
   const tokenInput = document.getElementById('token');
-  let droppedFile = null;
+  // Selected files as { file, name } pairs: paste assigns generated names,
+  // everything else keeps the file's own name
+  let selectedFiles = [];
+  let cardsHtml = '';
   const dropLabel = dropZone?.querySelector('span');
   const DEFAULT_DROP_LABEL = dropLabel?.textContent || 'Drag & drop or click to choose a file';
+  const DEFAULT_OVERRIDE_PLACEHOLDER = 'Leave blank to keep original';
+
+  const setSelectedFiles = (entries) => {
+    selectedFiles = entries;
+    if (dropLabel) {
+      if (entries.length === 0) {
+        dropLabel.textContent = DEFAULT_DROP_LABEL;
+      } else if (entries.length === 1) {
+        dropLabel.textContent = entries[0].name || entries[0].file.name;
+      } else {
+        dropLabel.textContent = `${entries.length} files selected`;
+      }
+    }
+    if (filenameInput) {
+      // The override names exactly one file; disable it for batches
+      if (entries.length > 1) {
+        filenameInput.disabled = true;
+        filenameInput.value = '';
+        filenameInput.placeholder = 'Per-file names kept (multiple files)';
+      } else {
+        filenameInput.disabled = false;
+        filenameInput.placeholder = DEFAULT_OVERRIDE_PLACEHOLDER;
+      }
+    }
+  };
+
+  const wrapFiles = (files) => Array.from(files || []).map((file) => ({ file, name: file.name }));
 
   const resetUploadForm = () => {
     uploadForm.reset();
-    droppedFile = null;
-    if (dropLabel) {
-      dropLabel.textContent = DEFAULT_DROP_LABEL;
-    }
+    cardsHtml = '';
+    setSelectedFiles([]);
     if (result) {
       result.classList.add('hidden');
       result.innerHTML = '';
@@ -103,10 +153,7 @@ if (uploadForm) {
     setDragging(false);
     const files = event.dataTransfer?.files;
     if (files && files.length) {
-      droppedFile = files[0];
-      if (dropLabel) {
-        dropLabel.textContent = droppedFile.name;
-      }
+      setSelectedFiles(wrapFiles(files));
     }
   });
 
@@ -117,105 +164,219 @@ if (uploadForm) {
   });
 
   fileInput?.addEventListener('change', () => {
-    const file = fileInput?.files?.[0];
-    if (file) {
-      droppedFile = file;
-      if (dropLabel) {
-        dropLabel.textContent = file.name;
-      }
+    if (fileInput?.files?.length) {
+      setSelectedFiles(wrapFiles(fileInput.files));
     }
   });
 
-  const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200 MB
+  const pastedFilename = (mime) => {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const subtype = (mime || '').split('/')[1] || '';
+    const ext = subtype.split('+')[0] || 'bin';
+    return `pasted-${stamp}.${ext}`;
+  };
+
+  document.addEventListener('paste', (event) => {
+    const files = event.clipboardData?.files;
+    if (!files || !files.length) {
+      // Text pastes (auth token, filename override) stay untouched
+      return;
+    }
+    event.preventDefault();
+    setSelectedFiles(
+      Array.from(files).map((file) => ({ file, name: pastedFilename(file.type) })),
+    );
+  });
+
+  // Server injects its real limit via data-max-file-size; the constant is
+  // only a fallback if the attribute is missing
+  const MAX_FILE_SIZE = Number(uploadForm.dataset.maxFileSize) || 200 * 1024 * 1024;
   const submitButton = uploadForm.querySelector('button[type="submit"]');
+
+  const humanSize = (bytes) => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = bytes;
+    let idx = 0;
+    while (size >= 1024 && idx < units.length - 1) {
+      size /= 1024;
+      idx += 1;
+    }
+    return idx === 0 ? `${bytes} ${units[idx]}` : `${size.toFixed(1)} ${units[idx]}`;
+  };
+
+  // XHR instead of fetch: only XMLHttpRequest exposes upload progress events
+  const uploadFile = (file, { name, expires, token, onProgress }) =>
+    new Promise((resolve, reject) => {
+      const params = new URLSearchParams();
+      if (name) {
+        params.set('name', name);
+      }
+      if (expires) {
+        params.set('expires', expires);
+      }
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/?' + params.toString());
+      if (token) {
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      }
+      if (xhr.upload) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            onProgress(event.loaded, event.total);
+          }
+        };
+      }
+      xhr.onload = () => {
+        let data;
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch (_) {
+          reject(new Error('Unexpected server response'));
+          return;
+        }
+        if (data.success) {
+          resolve(data);
+        } else {
+          reject(new Error(data.error?.message || 'Upload failed'));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(file);
+    });
+
+  const renderProgressHtml = (label, loaded, total) => {
+    const pct = total ? Math.floor((loaded / total) * 100) : 0;
+    return `
+      <div class="upload-progress">
+        <p>Uploading <strong>${label}</strong>…</p>
+        <progress max="${total}" value="${loaded}"></progress>
+        <span class="progress-text">${pct}% · ${humanSize(loaded)} / ${humanSize(total)}</span>
+      </div>
+    `;
+  };
+
+  const renderResultCard = (data) => {
+    const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
+    const hashRow = data.sha256
+      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
+      : '';
+    const deleteRow = data.delete_url
+      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
+      : '';
+    return `
+      <div class="file-card">
+        <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
+        ${warning}
+        <div class="result-actions">
+          <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
+        </div>
+        <div class="qr-block">${qrSvgTag(data.download_page_url)}</div>
+        <div class="link-list">
+          <div class="link-row">
+            <span class="row-label">Page</span>
+            <input type="text" readonly value="${data.download_page_url}">
+            <button type="button" data-copy="${data.download_page_url}">Copy</button>
+          </div>
+          <div class="link-row">
+            <span class="row-label">Raw</span>
+            <input type="text" readonly value="${data.raw_download_url}">
+            <button type="button" data-copy="${data.raw_download_url}">Copy</button>
+          </div>
+          ${hashRow}
+          ${deleteRow}
+        </div>
+      </div>
+    `;
+  };
+
+  const renderErrorCard = (name, message) => `
+    <div class="file-card file-card-error">
+      <p><strong>${name}</strong></p>
+      <p class="warn">${message}</p>
+    </div>
+  `;
+
+  // Exactly one h3 and one reset button regardless of file count
+  const renderSummaryHtml = () => `
+    <h3>Uploaded</h3>
+    <div class="result-actions">
+      <button type="button" data-reset>Upload another file</button>
+    </div>
+  `;
 
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const file = droppedFile || fileInput?.files?.[0];
-    if (!file) {
+    const entries = selectedFiles.length ? selectedFiles : wrapFiles(fileInput?.files);
+    if (!entries.length) {
       return;
     }
 
-    if (file.size > MAX_FILE_SIZE) {
-      if (result) {
-        result.classList.remove('hidden');
-        result.innerHTML = `<p class="warn">File is too large (${Math.round(file.size / 1024 / 1024)} MB). Maximum size is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB.</p>`;
-      }
-      return;
-    }
-
-    const params = new URLSearchParams();
-    const name = (filenameInput?.value || '').trim() || file.name;
-    if (name) {
-      params.set('name', name);
-    }
-    if (expirySelect?.value) {
-      params.set('expires', expirySelect.value);
-    }
+    const token = (tokenInput?.value || '').trim();
+    const override = (filenameInput?.value || '').trim();
+    cardsHtml = '';
+    let successCount = 0;
 
     if (result) {
       result.classList.remove('hidden');
-      result.innerHTML = 'Uploading...';
     }
     if (submitButton) {
       submitButton.disabled = true;
       submitButton.textContent = 'Uploading...';
     }
 
-    const headers = {};
-    const token = (tokenInput?.value || '').trim();
-    if (token) {
-      headers['Authorization'] = 'Bearer ' + token;
+    for (let i = 0; i < entries.length; i++) {
+      const { file } = entries[i];
+      // The override only ever applies to a single selected file
+      const name = entries.length === 1 && override ? override : entries[i].name || file.name;
+      const label = entries.length > 1 ? `${name} (file ${i + 1} of ${entries.length})` : name;
+
+      if (file.size > MAX_FILE_SIZE) {
+        cardsHtml += renderErrorCard(
+          name,
+          `File is too large (${humanSize(file.size)}). Maximum size is ${humanSize(MAX_FILE_SIZE)}.`,
+        );
+        if (result) {
+          result.innerHTML = cardsHtml;
+        }
+        continue;
+      }
+
+      if (result) {
+        result.innerHTML = renderProgressHtml(label, 0, file.size) + cardsHtml;
+      }
+      try {
+        const data = await uploadFile(file, {
+          name,
+          expires: expirySelect?.value || '',
+          token,
+          onProgress: (loaded, total) => {
+            if (result) {
+              result.innerHTML = renderProgressHtml(label, loaded, total) + cardsHtml;
+            }
+          },
+        });
+        successCount += 1;
+        cardsHtml += renderResultCard(data);
+      } catch (err) {
+        // One failed file must not abort the rest of the batch
+        cardsHtml += renderErrorCard(name, err.message);
+      }
+      if (result) {
+        result.innerHTML = cardsHtml;
+      }
     }
 
-    try {
-      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file, headers });
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error?.message || 'Upload failed');
-      }
-      const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
-      if (result) {
-        const hashRow = data.sha256
-          ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
-          : '';
-        const deleteRow = data.delete_url
-          ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
-          : '';
-        result.innerHTML = `
-          <h3>Uploaded</h3>
-          <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
-          ${warning}
-          <div class="result-actions">
-            <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
-            <button type="button" data-reset>Upload another file</button>
-          </div>
-          <div class="link-list">
-            <div class="link-row">
-              <span class="row-label">Page</span>
-              <input type="text" readonly value="${data.download_page_url}">
-              <button type="button" data-copy="${data.download_page_url}">Copy</button>
-            </div>
-            <div class="link-row">
-              <span class="row-label">Raw</span>
-              <input type="text" readonly value="${data.raw_download_url}">
-              <button type="button" data-copy="${data.raw_download_url}">Copy</button>
-            </div>
-            ${hashRow}
-            ${deleteRow}
-          </div>
-        `;
-      }
+    if (result) {
+      result.innerHTML = (successCount > 0 ? renderSummaryHtml() : '') + cardsHtml;
+    }
+    if (successCount > 0) {
       uploadForm.classList.add('hidden');
-    } catch (err) {
-      if (result) {
-        result.innerHTML = `<p class="warn">${err.message}</p>`;
-      }
-    } finally {
-      if (submitButton) {
-        submitButton.disabled = false;
-        submitButton.textContent = 'Upload';
-      }
+    }
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = 'Upload';
     }
   });
 }

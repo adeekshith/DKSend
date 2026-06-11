@@ -3,7 +3,7 @@ use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, get_service},
+    routing::{get, get_service, post},
     Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -54,6 +54,54 @@ struct AppConfig {
     port: u16,
     base_url: Option<String>,
     cleanup_interval: Duration,
+    access_log: bool,
+}
+
+fn parse_bool(value: Option<&str>, default: bool) -> bool {
+    match value {
+        None => default,
+        Some(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                default
+            } else {
+                !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+            }
+        }
+    }
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    // ?name= is user input; a control char here is a log-injection vector
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .collect()
+}
+
+fn access_log_line(event: &str, fields: &[(&str, &str)]) -> String {
+    let mut line = format!(
+        "{} event={}",
+        Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        event
+    );
+    for (key, value) in fields {
+        let clean = sanitize_log_value(value);
+        if clean.is_empty() || clean.contains(' ') || clean.contains('"') || clean.contains('=') {
+            let escaped = clean.replace('\\', "\\\\").replace('"', "\\\"");
+            line.push_str(&format!(" {key}=\"{escaped}\""));
+        } else {
+            line.push_str(&format!(" {key}={clean}"));
+        }
+    }
+    line
+}
+
+fn log_access(config: &AppConfig, event: &str, fields: &[(&str, &str)]) {
+    if !config.access_log {
+        return;
+    }
+    eprintln!("{}", access_log_line(event, fields));
 }
 
 struct Bucket {
@@ -130,6 +178,7 @@ struct Templates {
     download: String,
     error: String,
     delete: String,
+    admin: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +236,11 @@ struct DeleteQuery {
 
 #[derive(Debug, serde::Deserialize)]
 struct DeleteForm {
+    token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AdminForm {
     token: String,
 }
 
@@ -307,6 +361,8 @@ fn build_router(state: AppState) -> Router {
         .nest_service("/static", static_service)
         .route("/raw/:code", get(raw_download_code))
         .route("/raw/:code/:filename", get(raw_download_named))
+        .route("/admin", get(admin_page).post(admin_list_action))
+        .route("/admin/delete/:code", post(admin_delete_action))
         .route("/delete/:code", get(delete_confirm_page).post(delete_form_action))
         .route(
             "/:code",
@@ -323,11 +379,13 @@ async fn load_templates() -> Result<Templates, anyhow::Error> {
     let download = fs::read_to_string("static/download.html").await?;
     let error = fs::read_to_string("static/error.html").await?;
     let delete = fs::read_to_string("static/delete.html").await?;
+    let admin = fs::read_to_string("static/admin.html").await?;
     Ok(Templates {
         upload,
         download,
         error,
         delete,
+        admin,
     })
 }
 
@@ -401,6 +459,8 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         .unwrap_or(Duration::from_secs(60 * 60))
         .max(Duration::from_secs(60));
 
+    let access_log = parse_bool(env::var("ACCESS_LOG").ok().as_deref(), true);
+
     Ok(AppConfig {
         data_dir: PathBuf::from(data_dir),
         max_file_size,
@@ -420,6 +480,7 @@ fn load_config() -> Result<AppConfig, anyhow::Error> {
         port,
         base_url,
         cleanup_interval,
+        access_log,
     })
 }
 
@@ -488,10 +549,11 @@ async fn handle_upload(
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
 
     if let Some(limiter) = &state.upload_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "upload", &[("ip", &client), ("status", "429")]);
             return rate_limited(upload_error(
                 response_mode,
                 StatusCode::TOO_MANY_REQUESTS,
@@ -502,6 +564,7 @@ async fn handle_upload(
     }
 
     if !upload_authorized(&headers, &state.config) {
+        log_access(&state.config, "upload", &[("ip", &client), ("status", "401")]);
         return upload_error(
             response_mode,
             StatusCode::UNAUTHORIZED,
@@ -572,6 +635,7 @@ async fn handle_upload(
             }
         };
         if used.saturating_add(content_length) > cap {
+            log_access(&state.config, "upload", &[("ip", &client), ("status", "507")]);
             return upload_error(
                 response_mode,
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -699,6 +763,18 @@ async fn handle_upload(
         );
     }
 
+    log_access(
+        &state.config,
+        "upload",
+        &[
+            ("ip", &client),
+            ("status", "201"),
+            ("code", &code),
+            ("size", &size_written.to_string()),
+            ("file", &filename),
+        ],
+    );
+
     let base_url = resolve_base_url(&state.config, &headers);
     let encoded_filename = urlencoding::encode(&filename);
     let download_page_url = format!("{base_url}/{code}");
@@ -778,9 +854,11 @@ async fn download_page(
     code: String,
     filename: Option<String>,
 ) -> Response {
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+
     if let Some(limiter) = &state.lookup_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "page", &[("ip", &client), ("status", "429")]);
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
@@ -793,6 +871,11 @@ async fn download_page(
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
         Ok(None) => {
+            log_access(
+                &state.config,
+                "page",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist.",
@@ -811,6 +894,11 @@ async fn download_page(
     };
 
     if record.expires_at <= Utc::now() {
+        log_access(
+            &state.config,
+            "page",
+            &[("ip", &client), ("status", "410"), ("code", &code)],
+        );
         return html_error(
             StatusCode::GONE,
             "This file does not exist or is no longer available.",
@@ -825,9 +913,15 @@ async fn download_page(
     let canonical_url = format!("{base_url}/{code}/{encoded}");
 
     if filename.as_deref() != Some(&canonical_filename) {
+        // No log line here: the redirect's follow-up GET logs the page view
         return Redirect::temporary(&canonical_url).into_response();
     }
 
+    log_access(
+        &state.config,
+        "page",
+        &[("ip", &client), ("status", "200"), ("code", &code)],
+    );
     Html(render_download_page(&record, &base_url, &state.templates, &state.config)).into_response()
 }
 
@@ -855,9 +949,11 @@ async fn raw_download(
     headers: HeaderMap,
     code: String,
 ) -> Response {
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+
     if let Some(limiter) = &state.lookup_limiter {
-        let ip = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
-        if !limiter.allow(&ip) {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "download", &[("ip", &client), ("status", "429")]);
             return rate_limited(plain_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
@@ -867,22 +963,52 @@ async fn raw_download(
 
     let record = match fetch_upload(&state.pool, &code).await {
         Ok(Some(record)) => record,
-        Ok(None) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
+        Ok(None) => {
+            log_access(
+                &state.config,
+                "download",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
+            return plain_error(StatusCode::NOT_FOUND, "Not found.");
+        }
         Err(_) => return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "Server error."),
     };
 
     if record.expires_at <= Utc::now() {
+        log_access(
+            &state.config,
+            "download",
+            &[("ip", &client), ("status", "410"), ("code", &code)],
+        );
         return plain_error(StatusCode::GONE, "This file does not exist or is no longer available.");
     }
 
     let file = match File::open(&record.stored_path).await {
         Ok(file) => file,
-        Err(_) => return plain_error(StatusCode::NOT_FOUND, "Not found."),
+        Err(_) => {
+            log_access(
+                &state.config,
+                "download",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
+            return plain_error(StatusCode::NOT_FOUND, "Not found.");
+        }
     };
 
+    log_access(
+        &state.config,
+        "download",
+        &[("ip", &client), ("status", "200"), ("code", &code)],
+    );
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
     let mut response = body.into_response();
+    // Streamed bodies have no implicit length; set it from the record so
+    // clients can show download progress instead of an unknown size.
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from(record.size_bytes),
+    );
     let filename = urlencoding::encode(&record.original_filename);
     let content_disposition = format!("attachment; filename=\"{}\"", filename);
     response.headers_mut().insert(
@@ -912,6 +1038,18 @@ fn generate_delete_token() -> String {
         .collect()
 }
 
+// Removes the upload unconditionally — callers are responsible for
+// authorization (per-file token or admin token).
+async fn delete_record(state: &AppState, record: &UploadRecord) -> Result<(), anyhow::Error> {
+    // DB row first, then the file — same order and reasoning as cleanup_loop
+    sqlx::query("DELETE FROM uploads WHERE code = ?")
+        .bind(&record.code)
+        .execute(&state.pool)
+        .await?;
+    let _ = fs::remove_file(&record.stored_path).await;
+    Ok(())
+}
+
 async fn perform_delete(
     state: &AppState,
     code: &str,
@@ -922,27 +1060,44 @@ async fn perform_delete(
     };
     // Rows from before the delete-token migration store an empty token and
     // must stay undeletable; without this check an empty token would match.
+    // This guard belongs here, not in delete_record: the admin page may
+    // delete legacy rows, the public API must not.
     if record.delete_token.is_empty()
         || !constant_time_eq(token.as_bytes(), record.delete_token.as_bytes())
     {
         return Ok(DeleteOutcome::Forbidden);
     }
-    // DB row first, then the file — same order and reasoning as cleanup_loop
-    sqlx::query("DELETE FROM uploads WHERE code = ?")
-        .bind(code)
-        .execute(&state.pool)
-        .await?;
-    let _ = fs::remove_file(&record.stored_path).await;
+    delete_record(state, &record).await?;
     Ok(DeleteOutcome::Deleted)
+}
+
+// Maps a delete attempt to (http status label, outcome label) for the access log
+fn delete_outcome_parts(outcome: &Result<DeleteOutcome, anyhow::Error>) -> (&'static str, &'static str) {
+    match outcome {
+        Ok(DeleteOutcome::Deleted) => ("200", "deleted"),
+        Ok(DeleteOutcome::NotFound) => ("404", "not_found"),
+        Ok(DeleteOutcome::Forbidden) => ("403", "forbidden"),
+        Err(_) => ("500", "error"),
+    }
 }
 
 async fn delete_api(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     Query(params): Query<DeleteQuery>,
 ) -> Response {
     let token = params.token.unwrap_or_default();
-    match perform_delete(&state, &code, &token).await {
+    let outcome = perform_delete(&state, &code, &token).await;
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let (status, label) = delete_outcome_parts(&outcome);
+    log_access(
+        &state.config,
+        "delete",
+        &[("ip", &client), ("status", status), ("code", &code), ("outcome", label)],
+    );
+    match outcome {
         Ok(DeleteOutcome::Deleted) => json_response(
             StatusCode::OK,
             &serde_json::json!({ "success": true, "code": code }),
@@ -1007,10 +1162,20 @@ async fn delete_confirm_page(
 
 async fn delete_form_action(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<DeleteForm>,
 ) -> Response {
-    match perform_delete(&state, &code, &form.token).await {
+    let outcome = perform_delete(&state, &code, &form.token).await;
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let (status, label) = delete_outcome_parts(&outcome);
+    log_access(
+        &state.config,
+        "delete",
+        &[("ip", &client), ("status", status), ("code", &code), ("outcome", label)],
+    );
+    match outcome {
         Ok(DeleteOutcome::Deleted) => html_error(
             StatusCode::OK,
             "File deleted.",
@@ -1038,22 +1203,186 @@ async fn delete_form_action(
     }
 }
 
-async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
-    let row = sqlx::query(
-        "SELECT code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token FROM uploads WHERE code = ?",
+fn admin_enabled(config: &AppConfig) -> bool {
+    config.upload_token.is_some()
+}
+
+fn admin_token_valid(config: &AppConfig, token: &str) -> bool {
+    config
+        .upload_token
+        .as_deref()
+        .map(|expected| constant_time_eq(token.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false)
+}
+
+// With no UPLOAD_TOKEN there is no credential to gate on, so the admin
+// endpoints simply do not exist.
+fn admin_not_found(state: &AppState) -> Response {
+    html_error(
+        StatusCode::NOT_FOUND,
+        "This page does not exist.",
+        &state.templates,
+        &state.config,
     )
-    .bind(code)
-    .fetch_optional(pool)
-    .await?;
+}
 
-    let Some(row) = row else {
-        return Ok(None);
-    };
+async fn admin_page(State(state): State<AppState>) -> Response {
+    if !admin_enabled(&state.config) {
+        return admin_not_found(&state);
+    }
+    Html(render_admin_page(
+        &state.templates,
+        &state.config,
+        render_admin_login(),
+    ))
+    .into_response()
+}
 
+async fn admin_list_action(
+    State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    axum::Form(form): axum::Form<AdminForm>,
+) -> Response {
+    if !admin_enabled(&state.config) {
+        return admin_not_found(&state);
+    }
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    if let Some(limiter) = &state.lookup_limiter {
+        if !limiter.allow(&client) {
+            log_access(&state.config, "admin", &[("ip", &client), ("status", "429")]);
+            return rate_limited(html_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+                &state.templates,
+                &state.config,
+            ));
+        }
+    }
+    if !admin_token_valid(&state.config, &form.token) {
+        log_access(&state.config, "admin", &[("ip", &client), ("status", "403")]);
+        return html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid admin token.",
+            &state.templates,
+            &state.config,
+        );
+    }
+    log_access(&state.config, "admin", &[("ip", &client), ("status", "200")]);
+    admin_table_response(&state, &form.token).await
+}
+
+async fn admin_delete_action(
+    State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+    axum::Form(form): axum::Form<AdminForm>,
+) -> Response {
+    if !admin_enabled(&state.config) {
+        return admin_not_found(&state);
+    }
+    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    if let Some(limiter) = &state.lookup_limiter {
+        if !limiter.allow(&client) {
+            log_access(
+                &state.config,
+                "admin_delete",
+                &[("ip", &client), ("status", "429"), ("code", &code)],
+            );
+            return rate_limited(html_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests. Try again shortly.",
+                &state.templates,
+                &state.config,
+            ));
+        }
+    }
+    if !admin_token_valid(&state.config, &form.token) {
+        log_access(
+            &state.config,
+            "admin_delete",
+            &[("ip", &client), ("status", "403"), ("code", &code)],
+        );
+        return html_error(
+            StatusCode::FORBIDDEN,
+            "Invalid admin token.",
+            &state.templates,
+            &state.config,
+        );
+    }
+
+    match fetch_upload(&state.pool, &code).await {
+        Ok(Some(record)) => {
+            // The admin token authorizes deletion of any upload, including
+            // legacy rows that have no per-file delete token.
+            if delete_record(&state, &record).await.is_err() {
+                return html_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not delete the file.",
+                    &state.templates,
+                    &state.config,
+                );
+            }
+            log_access(
+                &state.config,
+                "admin_delete",
+                &[("ip", &client), ("status", "200"), ("code", &code), ("outcome", "deleted")],
+            );
+            admin_table_response(&state, &form.token).await
+        }
+        Ok(None) => {
+            log_access(
+                &state.config,
+                "admin_delete",
+                &[("ip", &client), ("status", "404"), ("code", &code)],
+            );
+            html_error(
+                StatusCode::NOT_FOUND,
+                "This file does not exist or was already deleted.",
+                &state.templates,
+                &state.config,
+            )
+        }
+        Err(_) => html_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the file.",
+            &state.templates,
+            &state.config,
+        ),
+    }
+}
+
+// Renders the uploads table after a successful token check. The token is
+// echoed into hidden form fields, so the response must never be cached.
+async fn admin_table_response(state: &AppState, token: &str) -> Response {
+    match fetch_active_uploads(&state.pool).await {
+        Ok(records) => {
+            let body = render_admin_list(&records, token);
+            let mut response =
+                Html(render_admin_page(&state.templates, &state.config, body)).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-store"),
+            );
+            response
+        }
+        Err(_) => html_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not load uploads.",
+            &state.templates,
+            &state.config,
+        ),
+    }
+}
+
+const UPLOAD_COLUMNS: &str =
+    "code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token";
+
+fn record_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<UploadRecord, anyhow::Error> {
     let created_at: String = row.try_get("created_at")?;
     let expires_at: String = row.try_get("expires_at")?;
-
-    let record = UploadRecord {
+    Ok(UploadRecord {
         code: row.try_get("code")?,
         original_filename: row.try_get("original_filename")?,
         stored_path: row.try_get("stored_path")?,
@@ -1062,9 +1391,30 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
         created_at: parse_datetime(&created_at)?,
         expires_at: parse_datetime(&expires_at)?,
         delete_token: row.try_get("delete_token")?,
+    })
+}
+
+async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
+    let row = sqlx::query(&format!("SELECT {UPLOAD_COLUMNS} FROM uploads WHERE code = ?"))
+        .bind(code)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
     };
 
-    Ok(Some(record))
+    Ok(Some(record_from_row(&row)?))
+}
+
+async fn fetch_active_uploads(pool: &Pool<Sqlite>) -> Result<Vec<UploadRecord>, anyhow::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE expires_at > ? ORDER BY created_at DESC"
+    ))
+    .bind(Utc::now().to_rfc3339())
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(record_from_row).collect()
 }
 
 async fn cleanup_loop(state: AppState, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
@@ -1212,7 +1562,7 @@ fn duration_short(duration: Duration) -> String {
 }
 
 // Path segments with routing meaning must never be handed out as share codes
-const RESERVED_CODES: &[&str] = &["raw", "static", "healthz", "delete"];
+const RESERVED_CODES: &[&str] = &["raw", "static", "healthz", "delete", "admin"];
 
 fn is_reserved_code(code: &str) -> bool {
     RESERVED_CODES.contains(&code)
@@ -1360,6 +1710,33 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
     output
 }
 
+// The expiry dropdown mirrors server config: the empty value means "let the
+// server apply DEFAULT_EXPIRY", followed by standard choices that fit within
+// the configured bounds.
+fn expiry_options_html(config: &AppConfig) -> String {
+    let candidates = [
+        Duration::from_secs(60 * 30),
+        Duration::from_secs(60 * 60),
+        Duration::from_secs(60 * 60 * 24),
+        Duration::from_secs(60 * 60 * 24 * 7),
+    ];
+    let mut html = format!(
+        r#"<option value="">{} (default)</option>"#,
+        duration_short(config.default_expiry)
+    );
+    for candidate in candidates {
+        if candidate < config.min_expiry
+            || candidate > config.max_expiry
+            || candidate == config.default_expiry
+        {
+            continue;
+        }
+        let label = duration_short(candidate);
+        html.push_str(&format!(r#"<option value="{label}">{label}</option>"#));
+    }
+    html
+}
+
 fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
@@ -1379,7 +1756,51 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
             ("{{site_url}}", base_url.to_string()),
             ("{{auth_required}}", auth_required.to_string()),
             ("{{auth_snippet}}", auth_snippet),
+            ("{{max_file_size}}", config.max_file_size.to_string()),
+            ("{{expiry_options}}", expiry_options_html(config)),
         ],
+    )
+}
+
+fn render_admin_page(templates: &Templates, config: &AppConfig, body: String) -> String {
+    render_template(
+        &templates.admin,
+        &[
+            ("{{title}}", escape_html(&config.brand_title)),
+            ("{{admin_body}}", body),
+        ],
+    )
+}
+
+fn render_admin_login() -> String {
+    r#"<form method="post" action="/admin" class="admin-login">
+      <label>Admin token (UPLOAD_TOKEN)
+        <input type="password" name="token" autocomplete="off" required>
+      </label>
+      <button type="submit">View uploads</button>
+    </form>"#
+        .to_string()
+}
+
+fn render_admin_list(records: &[UploadRecord], token: &str) -> String {
+    if records.is_empty() {
+        return r#"<p class="admin-empty">No active uploads.</p>"#.to_string();
+    }
+    let now = Utc::now();
+    let escaped_token = escape_html(token);
+    let mut rows = String::new();
+    for record in records {
+        let code = &record.code; // generated charset, safe to embed
+        let filename = escape_html(&record.original_filename);
+        let size = human_size(record.size_bytes);
+        let created = record.created_at.format("%Y-%m-%d %H:%M").to_string();
+        let expires = format_duration(record.expires_at - now);
+        rows.push_str(&format!(
+            r#"<tr><td><a href="/{code}">{code}</a></td><td class="file-name">{filename}</td><td>{size}</td><td>{created}</td><td>{expires}</td><td><form method="post" action="/admin/delete/{code}"><input type="hidden" name="token" value="{escaped_token}"><button type="submit">Delete</button></form></td></tr>"#
+        ));
+    }
+    format!(
+        r#"<table class="admin-table"><thead><tr><th>Code</th><th>Filename</th><th>Size</th><th>Uploaded (UTC)</th><th>Expires in</th><th></th></tr></thead><tbody>{rows}</tbody></table>"#
     )
 }
 
@@ -1491,6 +1912,8 @@ mod tests {
             port: 3000,
             base_url: None,
             cleanup_interval: Duration::from_secs(3600),
+            // Keep the test suite's stderr quiet
+            access_log: false,
         }
     }
 
@@ -1623,6 +2046,7 @@ mod tests {
             download: String::new(),
             error: String::new(),
             delete: String::new(),
+            admin: String::new(),
         };
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
@@ -1869,6 +2293,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(download_resp.status(), StatusCode::OK);
+        let body = download_resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), content.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn raw_download_has_content_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let content = "download me"; // 11 bytes
+        let upload_resp = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=sized.txt")
+                    .header("content-length", content.len().to_string())
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = upload_resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        let download_resp = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/sized.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        assert_eq!(
+            download_resp.headers().get(header::CONTENT_LENGTH).unwrap(),
+            &content.len().to_string()
+        );
         let body = download_resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body.as_ref(), content.as_bytes());
     }
@@ -2270,6 +2730,264 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    fn admin_post(path: &str, token: &str) -> Request<Body> {
+        Request::post(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("token={token}")))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_404_when_token_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+
+        let response = test_app(state.clone())
+            .oneshot(Request::get("/admin").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = test_app(state.clone())
+            .oneshot(admin_post("/admin", "anything"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin/delete/abc", "anything"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_get_renders_login_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(Request::get("/admin").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains(r#"type="password""#));
+        assert!(html.contains(r#"action="/admin""#));
+        assert!(!html.contains("s3cret"), "token must never be rendered unprompted");
+    }
+
+    #[tokio::test]
+    async fn admin_post_wrong_token_403() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "wrong"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_post_valid_token_lists_uploads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = None;
+        let (code_a, _) = upload_for_delete(&state).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "s3cret"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "token-bearing page must not be cached"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains(&format!(r#"<a href="/{code_a}">"#)));
+        assert!(html.contains("victim.txt"));
+        assert!(html.contains(&format!(r#"action="/admin/delete/{code_a}""#)));
+    }
+
+    #[tokio::test]
+    async fn admin_list_excludes_expired_uploads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("gone1")
+        .bind("expired.txt")
+        .bind("/tmp/none")
+        .bind(4i64)
+        .bind("")
+        .bind((now - ChronoDuration::hours(2)).to_rfc3339())
+        .bind((now - ChronoDuration::hours(1)).to_rfc3339())
+        .bind("tok")
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "s3cret"))
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!html.contains("expired.txt"));
+        assert!(html.contains("No active uploads."));
+    }
+
+    #[tokio::test]
+    async fn admin_list_escapes_filenames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+
+        let body = "x";
+        let response = test_app(state.clone())
+            .oneshot(
+                Request::put("/?name=%3Cimg%20src%3Dx%3E.txt")
+                    .header("content-length", body.len().to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        state.config.upload_token = Some("s3cret".to_string());
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "s3cret"))
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("&lt;img src=x&gt;.txt"));
+        assert!(!html.contains("<img src=x>"));
+    }
+
+    #[tokio::test]
+    async fn admin_delete_bypasses_per_file_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        let (code, _file_token) = upload_for_delete(&state).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let file_path = state.config.data_dir.join("files").join(&code);
+        assert!(file_path.exists());
+
+        let response = test_app(state.clone())
+            .oneshot(admin_post(&format!("/admin/delete/{code}"), "s3cret"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("No active uploads."), "table should be re-rendered");
+        assert!(!file_path.exists(), "file should be gone");
+
+        let response = test_app(state)
+            .oneshot(Request::get(format!("/{code}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_works_on_legacy_row_without_file_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let file_path = tmp.path().join("data").join("files").join("legacy");
+        tokio::fs::write(&file_path, b"old").await.unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO uploads (code, original_filename, stored_path, size_bytes, sha256_hex, created_at, expires_at, delete_token) VALUES (?, ?, ?, ?, ?, ?, ?, '')",
+        )
+        .bind("legacy")
+        .bind("old.txt")
+        .bind(file_path.to_string_lossy().to_string())
+        .bind(3i64)
+        .bind("")
+        .bind(now.to_rfc3339())
+        .bind((now + ChronoDuration::hours(1)).to_rfc3339())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin/delete/legacy", "s3cret"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn admin_delete_wrong_token_leaves_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        let (code, _) = upload_for_delete(&state).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state.clone())
+            .oneshot(admin_post(&format!("/admin/delete/{code}"), "wrong"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(state.config.data_dir.join("files").join(&code).exists());
+    }
+
+    #[tokio::test]
+    async fn admin_delete_unknown_code_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin/delete/nope", "s3cret"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_post_rate_limited_429() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        state.lookup_limiter = RateLimiter::new(1);
+
+        for expected in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            let response = test_app(state.clone())
+                .oneshot(
+                    Request::post("/admin")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("x-forwarded-for", "1.2.3.4")
+                        .body(Body::from("token=s3cret"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::TOO_MANY_REQUESTS {
+                assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "60");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2309,10 +3027,51 @@ mod tests {
 
     #[test]
     fn reserved_codes_not_generated() {
-        for code in ["raw", "static", "healthz", "delete"] {
+        for code in ["raw", "static", "healthz", "delete", "admin"] {
             assert!(is_reserved_code(code), "{code} must be reserved");
         }
         assert!(!is_reserved_code("abc12"));
+    }
+
+    #[test]
+    fn access_log_line_format_basic() {
+        let line = access_log_line(
+            "upload",
+            &[("ip", "1.2.3.4"), ("status", "201"), ("code", "ab3x9")],
+        );
+        let (timestamp, rest) = line.split_once(' ').unwrap();
+        assert_eq!(timestamp.len(), 20, "expected 2026-06-10T12:00:00Z form, got {timestamp}");
+        assert!(timestamp.ends_with('Z') && timestamp.contains('T'));
+        assert_eq!(rest, "event=upload ip=1.2.3.4 status=201 code=ab3x9");
+    }
+
+    #[test]
+    fn access_log_line_quotes_and_escapes_values() {
+        let line = access_log_line("upload", &[("file", "report q2.pdf"), ("note", "a\"b")]);
+        assert!(line.contains(r#"file="report q2.pdf""#));
+        assert!(line.contains(r#"note="a\"b""#));
+    }
+
+    #[test]
+    fn access_log_line_strips_control_chars() {
+        let line = access_log_line("upload", &[("file", "evil\nevent=fake\x1b[31m")]);
+        assert!(!line.contains('\n'), "newline must not survive: {line}");
+        assert!(!line.contains('\x1b'));
+        assert!(line.contains("evil?event=fake"));
+    }
+
+    #[test]
+    fn parse_bool_values() {
+        assert!(parse_bool(None, true));
+        assert!(!parse_bool(None, false));
+        for falsy in ["0", "false", "OFF", "no", " False "] {
+            assert!(!parse_bool(Some(falsy), true), "{falsy} should disable");
+        }
+        for truthy in ["1", "true", "on", "yes", "anything"] {
+            assert!(parse_bool(Some(truthy), false), "{truthy} should enable");
+        }
+        assert!(parse_bool(Some(""), true));
+        assert!(!parse_bool(Some(""), false));
     }
 
     #[test]
@@ -2496,6 +3255,7 @@ mod tests {
             download: String::new(),
             error: String::new(),
             delete: String::new(),
+            admin: String::new(),
         };
         let mut config = test_config(PathBuf::from("./data"));
         config.upload_token = Some("s3cret".to_string());
@@ -2512,10 +3272,51 @@ mod tests {
             download: String::new(),
             error: String::new(),
             delete: String::new(),
+            admin: String::new(),
         };
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
         assert!(!html.contains("Authorization: Bearer"));
+    }
+
+    #[test]
+    fn upload_page_embeds_max_file_size() {
+        let templates = Templates {
+            upload: std::fs::read_to_string("static/upload.html").unwrap(),
+            download: String::new(),
+            error: String::new(),
+            delete: String::new(),
+            admin: String::new(),
+        };
+        let mut config = test_config(PathBuf::from("./data"));
+        config.max_file_size = 1234;
+        let html = render_upload_page(&templates, &config, "https://example.com");
+        assert!(html.contains(r#"data-max-file-size="1234""#));
+    }
+
+    #[test]
+    fn expiry_options_respect_max_expiry() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.default_expiry = Duration::from_secs(3600);
+        config.max_expiry = Duration::from_secs(3600);
+        let html = expiry_options_html(&config);
+        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
+        assert!(html.contains(r#"value="30m""#));
+        assert!(!html.contains("1d"), "options above max_expiry must be dropped: {html}");
+        assert!(!html.contains("7d"));
+        assert!(!html.contains(r#"value="1h""#), "default must not be duplicated");
+    }
+
+    #[test]
+    fn expiry_options_skip_default_duplicate() {
+        // test_config: default 1h, bounds 5m..1d
+        let config = test_config(PathBuf::from("./data"));
+        let html = expiry_options_html(&config);
+        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
+        assert!(html.contains(r#"value="30m""#));
+        assert!(html.contains(r#"value="1d""#));
+        assert!(!html.contains(r#"value="1h""#));
+        assert!(!html.contains("7d"));
     }
 }

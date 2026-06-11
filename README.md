@@ -55,8 +55,8 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 
 ## Download
 
-- Web page: `GET /{code}/{filename}` — shows filename, size, expiry, and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`.
-- Raw file: `GET /raw/{code}/{filename}`
+- Web page: `GET /{code}/{filename}` — shows filename, size, expiry, a QR code of the share link (handy for phone-to-laptop transfers), and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`. The upload result panel shows the same QR code.
+- Raw file: `GET /raw/{code}/{filename}` — responses carry the exact `Content-Length`, so browsers and `curl` show real download progress.
 
 ## Delete
 
@@ -66,6 +66,12 @@ Every upload gets its own secret delete token, returned as `delete_token`/`delet
 - `curl -X DELETE "http://localhost:3000/{code}?token=<delete_token>"`
 
 Deleting removes the file and its metadata immediately. A second delete returns 404. Uploads created before this feature have no delete token and can only expire.
+
+## Admin
+
+When `UPLOAD_TOKEN` is set, `GET /admin` shows a token form; entering the token lists all active uploads (code, filename, size, upload time, expiry) with a per-file Delete button. Without `UPLOAD_TOKEN` the admin endpoints return 404.
+
+Note that `UPLOAD_TOKEN` is therefore a full admin credential: anyone holding it can list and delete every upload, including ones created before delete tokens existed. Token attempts are slowed by the lookup rate limit, so a busy admin session can hit HTTP 429 — raise `RATE_LIMIT_LOOKUPS_PER_MIN` if that bites.
 
 ## Configuration
 
@@ -85,14 +91,44 @@ Environment variables:
 - `RATE_LIMIT_UPLOADS_PER_MIN` (default: 20, 0 disables) - per-IP upload requests per minute
 - `RATE_LIMIT_LOOKUPS_PER_MIN` (default: 60, 0 disables) - per-IP download/page requests per minute
 - `CLEANUP_INTERVAL` (default: `1h`, minimum `1m`) - how often expired uploads are purged
+- `ACCESS_LOG` (default: on; `0`/`false`/`off` disables) - per-request log lines on stderr
 
 Durations use `30m`, `1h`, `2d`.
+
+The web UI follows this configuration: the client-side size check uses `MAX_FILE_SIZE`, and the expiry dropdown is rendered from `DEFAULT_EXPIRY`/`MAX_EXPIRY`.
+
+## Web UI
+
+- Uploads show a live progress bar with transferred/total bytes.
+- Select or drop multiple files: they upload one after another, each getting its own result card with links and QR code. The filename override applies only when a single file is selected.
+- Paste a file or screenshot (Ctrl/Cmd+V) anywhere on the upload page to select it; pasted files get a generated name like `pasted-2026-06-10-181203.png`. Pasting text into the token or filename fields works as usual.
+
+## Access log
+
+One line per request is written to stderr (where `docker logs` collects it):
+
+```
+2026-06-10T18:21:03Z event=upload ip=1.2.3.4 status=201 code=ab3x9 size=11 file=report.pdf
+2026-06-10T18:22:41Z event=page ip=5.6.7.8 status=200 code=ab3x9
+2026-06-10T18:22:44Z event=download ip=5.6.7.8 status=200 code=ab3x9
+2026-06-10T18:25:02Z event=delete ip=1.2.3.4 status=200 code=ab3x9 outcome=deleted
+```
+
+Events: `upload` (201/401/429/507), `page` and `download` (200/404/410/429 — 404s are what share-code guessing looks like), `delete` (with `outcome=`). Lines are grep-friendly: `grep 'status=404'`, `grep 'code=ab3x9'`. Set `ACCESS_LOG=0` to disable.
 
 ## Health check
 
 `GET /healthz` returns `{"status":"ok"}` with HTTP 200 when the server and its database are reachable (503 otherwise). The Docker image deliberately ships no built-in `HEALTHCHECK` — the periodic check process keeps page-cache pages active, which inflates `docker stats` by a few MB. Opt in by uncommenting the `healthcheck` block in [docker-compose.yml](docker-compose.yml) or pointing your monitoring at `/healthz`. The server also shuts down cleanly on SIGTERM/SIGINT, finishing in-flight requests, so `docker stop` is fast.
 
 ## Docker / Podman
+
+The container runs as an unprivileged user (uid 1000). When bind-mounting a data directory, make sure uid 1000 can write to it:
+
+```bash
+mkdir -p data && sudo chown -R 1000:1000 data
+```
+
+**Upgrading from an older (root) image:** an existing `./data` is likely root-owned, so the new image crash-loops with `DKSend error` in `docker logs` until you run the `chown` above (or temporarily run with `--user 0:0`).
 
 Build:
 
@@ -216,3 +252,7 @@ DATA_DIR=/tmp/dksend-test cd tests/e2e && npx playwright test
 ## Database
 
 SQLite with migrations in `migrations/`. Metadata is stored in `uploads.db` under `DATA_DIR`.
+
+## Vendored assets
+
+- `static/qr.js` — [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) v2.0.4 by Kazuhiko Arase, MIT license (header retained in the file).

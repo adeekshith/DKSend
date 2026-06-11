@@ -1,0 +1,3 @@
+# sqlx records a checksum of each migration; CRLF checkouts would change it
+# and break startup with "previously applied but has been modified".
+*.sql text eol=lf

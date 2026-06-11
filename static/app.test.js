@@ -124,31 +124,76 @@ function makeDom() {
   return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, tokenInput, resultDiv, spanEl, submitBtn };
 }
 
-function loadApp(dom) {
-  const { document, uploadForm } = dom;
+const SUCCESS_JSON = {
+  success: true,
+  code: 'abc',
+  filename: 'test.txt',
+  size_bytes: 100,
+  download_page_url: 'http://localhost/abc',
+  raw_download_url: 'http://localhost/raw/abc/test.txt',
+  sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+  delete_token: 'tok123tok123tok123tok123tok12312',
+  delete_url: 'http://localhost/delete/abc?token=tok123tok123tok123tok123tok12312',
+};
+
+// Mirrors the subset of XMLHttpRequest that app.js uses. Auto-responds on a
+// microtask unless opts.manual, in which case tests drive
+// instances[i].upload.onprogress(...) and instances[i].respond(...).
+function makeFakeXhrClass(getResponse, manual) {
+  const instances = [];
+  class FakeXHR {
+    constructor() {
+      this.upload = {};
+      this.requestHeaders = {};
+      instances.push(this);
+    }
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(key, value) {
+      this.requestHeaders[key] = value;
+    }
+    send(body) {
+      this.body = body;
+      if (!manual) {
+        queueMicrotask(() => this.respond());
+      }
+    }
+    respond(reply) {
+      const r = reply || getResponse();
+      this.status = r.status ?? 200;
+      this.responseText = JSON.stringify(r.json);
+      this.onload?.();
+    }
+    fail() {
+      this.onerror?.();
+    }
+  }
+  FakeXHR.instances = instances;
+  return FakeXHR;
+}
+
+function loadApp(dom, opts = {}) {
+  const { document } = dom;
   // Inject globals and evaluate app.js
   const code = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
-  const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', code);
-  let lastFetchArgs = null;
-  const fakeFetch = async (...args) => {
-    lastFetchArgs = args;
-    return {
-      json: async () => ({
-        success: true,
-        code: 'abc',
-        filename: 'test.txt',
-        size_bytes: 100,
-        download_page_url: 'http://localhost/abc',
-        raw_download_url: 'http://localhost/raw/abc/test.txt',
-        sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
-        delete_token: 'tok123tok123tok123tok123tok12312',
-        delete_url: 'http://localhost/delete/abc?token=tok123tok123tok123tok123tok12312',
-      }),
-    };
-  };
+  const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', 'XMLHttpRequest', code);
+  const responses = opts.responses ? [...opts.responses] : [];
+  const getResponse = () => (responses.length ? responses.shift() : { status: 200, json: SUCCESS_JSON });
+  const FakeXHR = makeFakeXhrClass(getResponse, !!opts.manual);
   const fakeNav = { clipboard: { writeText: async () => {} } };
-  wrapped(document, fakeNav, fakeFetch, (fn) => fn(), {});
-  return { getLastFetch: () => lastFetchArgs };
+  wrapped(document, fakeNav, undefined, (fn) => fn(), opts.window || {}, FakeXHR);
+  return {
+    instances: FakeXHR.instances,
+    getLastFetch: () => {
+      const last = FakeXHR.instances[FakeXHR.instances.length - 1];
+      if (!last || last.body === undefined) {
+        return null;
+      }
+      return [last.url, { method: last.method, body: last.body, headers: last.requestHeaders }];
+    },
+  };
 }
 
 describe('drag and drop upload', () => {
@@ -255,6 +300,31 @@ describe('drag and drop upload', () => {
     assert.ok(dom.resultDiv.innerHTML.includes('too large'));
   });
 
+  it('reads max file size from the data-max-file-size attribute', async () => {
+    const dom2 = makeDom();
+    dom2.uploadForm.dataset.maxFileSize = '1024';
+    const ctx2 = loadApp(dom2);
+    const file = { name: 'small-but-over.bin', size: 2048 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx2.getLastFetch(), null, 'upload must be blocked by the injected limit');
+    assert.ok(dom2.resultDiv.innerHTML.includes('too large'));
+    assert.ok(dom2.resultDiv.innerHTML.includes('1.0 KB'), 'limit should be human-formatted');
+  });
+
+  it('falls back to 200 MB when the attribute is missing', async () => {
+    const okFile = { name: 'ok.bin', size: 199 * 1024 * 1024 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [okFile] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.notEqual(ctx.getLastFetch(), null, '199 MB should pass the default limit');
+  });
+
   it('disables submit button during upload', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -357,6 +427,102 @@ describe('drag and drop upload', () => {
     assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file', 'drop label restored');
   });
 
+  it('shows a progress bar while uploading', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('<progress'), 'progress element shown during upload');
+    assert.ok(dom2.resultDiv.innerHTML.includes('big.bin'));
+
+    ctx2.instances[0].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Uploaded'), 'result panel replaces progress');
+  });
+
+  it('updates transferred bytes on progress events', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded: 512, total: 1024 });
+    assert.ok(dom2.resultDiv.innerHTML.includes('50%'), 'percentage reflects progress');
+    assert.ok(dom2.resultDiv.innerHTML.includes('512 B / 1.0 KB'), 'transferred/total shown');
+
+    ctx2.instances[0].respond();
+  });
+
+  it('shows the server error message when the response is not success', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'File exceeds the configured size limit.' } } },
+      ],
+    });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('File exceeds the configured size limit.'));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible on failure');
+  });
+
+  it('shows a network error message when the request fails', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'f.txt', size: 10 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    ctx2.instances[0].fail();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Network error'));
+  });
+
+  it('embeds a QR code for the download page url in the result block', async () => {
+    const dom2 = makeDom();
+    let receivedText = null;
+    const fakeQrcode = () => ({
+      addData(text) { receivedText = text; },
+      make() {},
+      createSvgTag: () => '<svg data-fake-qr="1"></svg>',
+    });
+    loadApp(dom2, { window: { qrcode: fakeQrcode } });
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('qr-block'));
+    assert.ok(dom2.resultDiv.innerHTML.includes('data-fake-qr'));
+    assert.equal(receivedText, 'http://localhost/abc', 'QR encodes the download page url');
+  });
+
+  it('renders an empty QR block when the qr library is missing', async () => {
+    const file = { name: 'doc.pdf', size: 2048 };
+    dom.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom.resultDiv.innerHTML.includes('class="qr-block"'), 'block present');
+    assert.ok(!dom.resultDiv.innerHTML.includes('<svg'), 'no svg without the library');
+  });
+
   it('sends Authorization header when the token field is filled', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -378,6 +544,146 @@ describe('drag and drop upload', () => {
     await new Promise((r) => setTimeout(r, 10));
     const [, opts] = ctx.getLastFetch();
     assert.equal(opts.headers['Authorization'], undefined);
+  });
+
+  function dispatchPaste(targetDom, files, spy = {}) {
+    const event = {
+      type: 'paste',
+      clipboardData: { files },
+      preventDefault() { spy.prevented = true; },
+    };
+    for (const handler of targetDom.document._listeners.paste || []) {
+      handler(event);
+    }
+    return spy;
+  }
+
+  it('pasting a file selects it and updates the drop label', () => {
+    const file = { name: 'ignored.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    assert.ok(dom.spanEl.textContent.startsWith('pasted-'), `label is ${dom.spanEl.textContent}`);
+    assert.ok(dom.spanEl.textContent.endsWith('.png'));
+  });
+
+  it('pasted image upload uses a generated mime-derived filename', async () => {
+    const file = { name: 'ignored.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [url] = ctx.getLastFetch();
+    assert.ok(url.includes('name=pasted-'), `url is ${url}`);
+    assert.ok(url.includes('.png'));
+  });
+
+  it('text paste does not steal the selection', () => {
+    const spy = dispatchPaste(dom, [], {});
+    assert.notEqual(spy.prevented, true, 'preventDefault must not run for text pastes');
+    assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file');
+  });
+
+  it('selecting multiple files updates the label to a count', () => {
+    dom.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.spanEl.textContent, '2 files selected');
+  });
+
+  it('disables the filename override for multiple files and re-enables for one', () => {
+    dom.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.filenameInput.disabled, true);
+
+    dom.fileInput.files = [{ name: 'solo.txt', size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    assert.equal(dom.filenameInput.disabled, false);
+  });
+
+  it('uploads multiple files sequentially', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    dom2.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(ctx2.instances.length, 1, 'second upload must wait for the first');
+    assert.ok(ctx2.instances[0].url.includes('name=a.txt'));
+
+    ctx2.instances[0].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx2.instances.length, 2, 'second upload starts after the first finishes');
+    assert.ok(ctx2.instances[1].url.includes('name=b.txt'));
+
+    ctx2.instances[1].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    const cards = dom2.resultDiv.innerHTML.match(/class="file-card"/g) || [];
+    assert.equal(cards.length, 2, 'one card per file');
+    assert.ok(dom2.resultDiv.innerHTML.includes('<h3>Uploaded</h3>'));
+  });
+
+  it('applies the filename override only to a single file', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    dom2.filenameInput.value = 'custom.txt';
+    dom2.fileInput.files = [
+      { name: 'a.txt', size: 10 },
+      { name: 'b.txt', size: 20 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(ctx2.instances[0].url.includes('name=a.txt'), 'per-file name kept for batches');
+    assert.ok(!ctx2.instances[0].url.includes('custom.txt'));
+    ctx2.instances[0].respond();
+  });
+
+  it('continues after a per-file failure and renders an error card', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+        { status: 201, json: SUCCESS_JSON },
+      ],
+    });
+    dom2.fileInput.files = [
+      { name: 'fails.bin', size: 10 },
+      { name: 'works.txt', size: 10 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const html = dom2.resultDiv.innerHTML;
+    assert.ok(html.includes('file-card-error'), 'failed file gets an error card');
+    assert.ok(html.includes('too big'));
+    assert.ok(html.includes('Open download page'), 'successful file still gets its card');
+    assert.ok(dom2.uploadForm.classList.contains('hidden'), 'form hides when at least one succeeded');
+  });
+
+  it('keeps the form visible when every file fails', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+        { status: 413, json: { success: false, error: { message: 'too big' } } },
+      ],
+    });
+    dom2.fileInput.files = [
+      { name: 'a.bin', size: 10 },
+      { name: 'b.bin', size: 10 },
+    ];
+    dom2.fileInput.dispatchEvent(makeEvent('change'));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'));
+    assert.ok(!dom2.resultDiv.innerHTML.includes('<h3>Uploaded</h3>'));
   });
 
   it('includes expiry in upload request', async () => {
@@ -415,5 +721,34 @@ describe('upload.html template', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
     assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
+  });
+
+  it('injects expiry options from the server', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('{{expiry_options}}'), 'expiry options come from server config');
+    assert.ok(!html.includes('value="30m"'), 'no hardcoded expiry options');
+  });
+
+  it('exposes the configured max file size on the form', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
+  });
+
+  it('file input allows multiple files', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(/<input[^>]*type="file"[^>]*multiple/.test(html));
+  });
+
+  it('loads the QR library before app.js', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.indexOf('/static/qr.js') !== -1);
+    assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
+  });
+
+  it('download page has a QR placeholder and the QR library', () => {
+    const html = readFileSync(new URL('./download.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('data-qr="{{download_page_url}}"'));
+    assert.ok(html.indexOf('/static/qr.js') !== -1);
+    assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
   });
 });

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{title}}</title>
-    <link rel="stylesheet" href="/static/app.css?v=6">
+    <link rel="stylesheet" href="/static/app.css?v=9">
   </head>
   <body>
     <main class="shell">
@@ -12,9 +12,9 @@
         <h1>{{title}}</h1>
       </header>
       <section class="card">
-        <form id="upload-form" data-auth-required="{{auth_required}}">
+        <form id="upload-form" data-auth-required="{{auth_required}}" data-max-file-size="{{max_file_size}}">
           <label class="drop" id="drop-zone">
-            <input type="file" id="file">
+            <input type="file" id="file" multiple>
             <span>Drag &amp; drop or click to choose a file</span>
           </label>
           <div class="row">
@@ -25,11 +25,8 @@
             <label>
               Expiry
               <select id="expiry">
-                <!-- 1d is the default expiry; 24h is a duplicate and removed -->
-                <option value="">1d (default)</option>
-                <option value="30m">30m</option>
-                <option value="1h">1h</option>
-                <option value="7d">7d</option>
+                <!-- Options are rendered server-side from DEFAULT_EXPIRY/MAX_EXPIRY -->
+                {{expiry_options}}
               </select>
             </label>
           </div>
@@ -51,6 +48,7 @@
         </div>
       </section>
     </main>
-    <script src="/static/app.js?v=6" defer></script>
+    <script src="/static/qr.js?v=1" defer></script>
+    <script src="/static/app.js?v=10" defer></script>
   </body>
 </html>
