@@ -332,6 +332,22 @@ button:hover,
   font-weight: 600;
 }
 
+.upload-progress {
+  margin-top: 4px;
+  text-align: center;
+}
+
+.upload-progress progress {
+  width: 100%;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
+.progress-text {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .admin-card {
   text-align: left;
   overflow-x: auto;

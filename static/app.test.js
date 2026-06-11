@@ -124,31 +124,76 @@ function makeDom() {
   return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, tokenInput, resultDiv, spanEl, submitBtn };
 }
 
-function loadApp(dom) {
-  const { document, uploadForm } = dom;
+const SUCCESS_JSON = {
+  success: true,
+  code: 'abc',
+  filename: 'test.txt',
+  size_bytes: 100,
+  download_page_url: 'http://localhost/abc',
+  raw_download_url: 'http://localhost/raw/abc/test.txt',
+  sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+  delete_token: 'tok123tok123tok123tok123tok12312',
+  delete_url: 'http://localhost/delete/abc?token=tok123tok123tok123tok123tok12312',
+};
+
+// Mirrors the subset of XMLHttpRequest that app.js uses. Auto-responds on a
+// microtask unless opts.manual, in which case tests drive
+// instances[i].upload.onprogress(...) and instances[i].respond(...).
+function makeFakeXhrClass(getResponse, manual) {
+  const instances = [];
+  class FakeXHR {
+    constructor() {
+      this.upload = {};
+      this.requestHeaders = {};
+      instances.push(this);
+    }
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(key, value) {
+      this.requestHeaders[key] = value;
+    }
+    send(body) {
+      this.body = body;
+      if (!manual) {
+        queueMicrotask(() => this.respond());
+      }
+    }
+    respond(reply) {
+      const r = reply || getResponse();
+      this.status = r.status ?? 200;
+      this.responseText = JSON.stringify(r.json);
+      this.onload?.();
+    }
+    fail() {
+      this.onerror?.();
+    }
+  }
+  FakeXHR.instances = instances;
+  return FakeXHR;
+}
+
+function loadApp(dom, opts = {}) {
+  const { document } = dom;
   // Inject globals and evaluate app.js
   const code = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
-  const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', code);
-  let lastFetchArgs = null;
-  const fakeFetch = async (...args) => {
-    lastFetchArgs = args;
-    return {
-      json: async () => ({
-        success: true,
-        code: 'abc',
-        filename: 'test.txt',
-        size_bytes: 100,
-        download_page_url: 'http://localhost/abc',
-        raw_download_url: 'http://localhost/raw/abc/test.txt',
-        sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
-        delete_token: 'tok123tok123tok123tok123tok12312',
-        delete_url: 'http://localhost/delete/abc?token=tok123tok123tok123tok123tok12312',
-      }),
-    };
-  };
+  const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', 'XMLHttpRequest', code);
+  const responses = opts.responses ? [...opts.responses] : [];
+  const getResponse = () => (responses.length ? responses.shift() : { status: 200, json: SUCCESS_JSON });
+  const FakeXHR = makeFakeXhrClass(getResponse, !!opts.manual);
   const fakeNav = { clipboard: { writeText: async () => {} } };
-  wrapped(document, fakeNav, fakeFetch, (fn) => fn(), {});
-  return { getLastFetch: () => lastFetchArgs };
+  wrapped(document, fakeNav, undefined, (fn) => fn(), opts.window || {}, FakeXHR);
+  return {
+    instances: FakeXHR.instances,
+    getLastFetch: () => {
+      const last = FakeXHR.instances[FakeXHR.instances.length - 1];
+      if (!last || last.body === undefined) {
+        return null;
+      }
+      return [last.url, { method: last.method, body: last.body, headers: last.requestHeaders }];
+    },
+  };
 }
 
 describe('drag and drop upload', () => {
@@ -380,6 +425,71 @@ describe('drag and drop upload', () => {
     assert.ok(dom.resultDiv.classList.contains('hidden'), 'result is hidden');
     assert.equal(dom.resultDiv.innerHTML, '', 'result is cleared');
     assert.equal(dom.spanEl.textContent, 'Drag & drop or click to choose a file', 'drop label restored');
+  });
+
+  it('shows a progress bar while uploading', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('<progress'), 'progress element shown during upload');
+    assert.ok(dom2.resultDiv.innerHTML.includes('big.bin'));
+
+    ctx2.instances[0].respond();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Uploaded'), 'result panel replaces progress');
+  });
+
+  it('updates transferred bytes on progress events', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded: 512, total: 1024 });
+    assert.ok(dom2.resultDiv.innerHTML.includes('50%'), 'percentage reflects progress');
+    assert.ok(dom2.resultDiv.innerHTML.includes('512 B / 1.0 KB'), 'transferred/total shown');
+
+    ctx2.instances[0].respond();
+  });
+
+  it('shows the server error message when the response is not success', async () => {
+    const dom2 = makeDom();
+    loadApp(dom2, {
+      responses: [
+        { status: 413, json: { success: false, error: { message: 'File exceeds the configured size limit.' } } },
+      ],
+    });
+    const file = { name: 'big.bin', size: 1024 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('File exceeds the configured size limit.'));
+    assert.ok(!dom2.uploadForm.classList.contains('hidden'), 'form stays visible on failure');
+  });
+
+  it('shows a network error message when the request fails', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+    const file = { name: 'f.txt', size: 10 };
+    dom2.dropZone.dispatchEvent(
+      makeEvent('drop', { dataTransfer: { files: [file] } }),
+    );
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    ctx2.instances[0].fail();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(dom2.resultDiv.innerHTML.includes('Network error'));
   });
 
   it('sends Authorization header when the token field is filled', async () => {

@@ -142,6 +142,90 @@ if (uploadForm) {
     return idx === 0 ? `${bytes} ${units[idx]}` : `${size.toFixed(1)} ${units[idx]}`;
   };
 
+  // XHR instead of fetch: only XMLHttpRequest exposes upload progress events
+  const uploadFile = (file, { name, expires, token, onProgress }) =>
+    new Promise((resolve, reject) => {
+      const params = new URLSearchParams();
+      if (name) {
+        params.set('name', name);
+      }
+      if (expires) {
+        params.set('expires', expires);
+      }
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/?' + params.toString());
+      if (token) {
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      }
+      if (xhr.upload) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            onProgress(event.loaded, event.total);
+          }
+        };
+      }
+      xhr.onload = () => {
+        let data;
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch (_) {
+          reject(new Error('Unexpected server response'));
+          return;
+        }
+        if (data.success) {
+          resolve(data);
+        } else {
+          reject(new Error(data.error?.message || 'Upload failed'));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(file);
+    });
+
+  const renderProgressHtml = (label, loaded, total) => {
+    const pct = total ? Math.floor((loaded / total) * 100) : 0;
+    return `
+      <div class="upload-progress">
+        <p>Uploading <strong>${label}</strong>…</p>
+        <progress max="${total}" value="${loaded}"></progress>
+        <span class="progress-text">${pct}% · ${humanSize(loaded)} / ${humanSize(total)}</span>
+      </div>
+    `;
+  };
+
+  const renderResultHtml = (data) => {
+    const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
+    const hashRow = data.sha256
+      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
+      : '';
+    const deleteRow = data.delete_url
+      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
+      : '';
+    return `
+      <h3>Uploaded</h3>
+      <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
+      ${warning}
+      <div class="result-actions">
+        <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
+        <button type="button" data-reset>Upload another file</button>
+      </div>
+      <div class="link-list">
+        <div class="link-row">
+          <span class="row-label">Page</span>
+          <input type="text" readonly value="${data.download_page_url}">
+          <button type="button" data-copy="${data.download_page_url}">Copy</button>
+        </div>
+        <div class="link-row">
+          <span class="row-label">Raw</span>
+          <input type="text" readonly value="${data.raw_download_url}">
+          <button type="button" data-copy="${data.raw_download_url}">Copy</button>
+        </div>
+        ${hashRow}
+        ${deleteRow}
+      </div>
+    `;
+  };
+
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const file = droppedFile || fileInput?.files?.[0];
@@ -157,67 +241,31 @@ if (uploadForm) {
       return;
     }
 
-    const params = new URLSearchParams();
     const name = (filenameInput?.value || '').trim() || file.name;
-    if (name) {
-      params.set('name', name);
-    }
-    if (expirySelect?.value) {
-      params.set('expires', expirySelect.value);
-    }
+    const token = (tokenInput?.value || '').trim();
 
     if (result) {
       result.classList.remove('hidden');
-      result.innerHTML = 'Uploading...';
+      result.innerHTML = renderProgressHtml(name, 0, file.size);
     }
     if (submitButton) {
       submitButton.disabled = true;
       submitButton.textContent = 'Uploading...';
     }
 
-    const headers = {};
-    const token = (tokenInput?.value || '').trim();
-    if (token) {
-      headers['Authorization'] = 'Bearer ' + token;
-    }
-
     try {
-      const res = await fetch('/?' + params.toString(), { method: 'PUT', body: file, headers });
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error?.message || 'Upload failed');
-      }
-      const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
+      const data = await uploadFile(file, {
+        name,
+        expires: expirySelect?.value || '',
+        token,
+        onProgress: (loaded, total) => {
+          if (result) {
+            result.innerHTML = renderProgressHtml(name, loaded, total);
+          }
+        },
+      });
       if (result) {
-        const hashRow = data.sha256
-          ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
-          : '';
-        const deleteRow = data.delete_url
-          ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
-          : '';
-        result.innerHTML = `
-          <h3>Uploaded</h3>
-          <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
-          ${warning}
-          <div class="result-actions">
-            <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
-            <button type="button" data-reset>Upload another file</button>
-          </div>
-          <div class="link-list">
-            <div class="link-row">
-              <span class="row-label">Page</span>
-              <input type="text" readonly value="${data.download_page_url}">
-              <button type="button" data-copy="${data.download_page_url}">Copy</button>
-            </div>
-            <div class="link-row">
-              <span class="row-label">Raw</span>
-              <input type="text" readonly value="${data.raw_download_url}">
-              <button type="button" data-copy="${data.raw_download_url}">Copy</button>
-            </div>
-            ${hashRow}
-            ${deleteRow}
-          </div>
-        `;
+        result.innerHTML = renderResultHtml(data);
       }
       uploadForm.classList.add('hidden');
     } catch (err) {
