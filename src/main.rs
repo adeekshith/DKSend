@@ -277,7 +277,12 @@ async fn run() -> Result<(), anyhow::Error> {
         config.max_expiry.as_secs(),
         config.brand_title
     );
-    fs::create_dir_all(config.data_dir.join("files")).await?;
+    let files_dir = config.data_dir.join("files");
+    fs::create_dir_all(&files_dir).await?;
+    // create_dir_all is a no-op on an existing directory and never checks
+    // writability, so a root-owned files/ from a pre-non-root image would
+    // otherwise only fail on the first upload.
+    ensure_writable(&files_dir)?;
 
     let pool = SqlitePoolOptions::new()
         .max_connections(10)
@@ -321,6 +326,22 @@ async fn run() -> Result<(), anyhow::Error> {
     let _ = shutdown_tx.send(true);
 
     Ok(())
+}
+
+fn ensure_writable(dir: &std::path::Path) -> Result<(), anyhow::Error> {
+    let probe = dir.join(".write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "data directory {} is not writable by the server process ({err}) — if you upgraded \
+             from a root-based Docker image, run on the host: chown -R 1000:1000 <your data dir> \
+             (see README, 'Upgrading from an older (root) image')",
+            dir.display()
+        )),
+    }
 }
 
 async fn shutdown_signal() {
@@ -2986,6 +3007,50 @@ mod tests {
                 assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "60");
             }
         }
+    }
+
+    #[test]
+    fn ensure_writable_accepts_writable_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(ensure_writable(&dir).is_ok());
+        assert!(
+            !dir.join(".write-probe").exists(),
+            "probe file must be cleaned up"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_writable_rejects_readonly_dir() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Root ignores directory permissions (the Docker test image runs
+        // cargo test as root), so the failure path is untestable there.
+        let marker = tmp.path().join("uid-marker");
+        std::fs::write(&marker, b"").unwrap();
+        if std::fs::metadata(&marker).unwrap().uid() == 0 {
+            eprintln!("skipping ensure_writable_rejects_readonly_dir: running as root");
+            return;
+        }
+
+        let dir = tmp.path().join("files");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let err = ensure_writable(&dir).unwrap_err().to_string();
+        assert!(err.contains("is not writable"), "unexpected message: {err}");
+        assert!(err.contains("chown -R 1000:1000"), "message must be actionable: {err}");
+
+        // Restore permissions so tempdir cleanup succeeds
+        let mut restore = std::fs::metadata(&dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&dir, restore).unwrap();
     }
 
     #[tokio::test]

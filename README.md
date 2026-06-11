@@ -142,7 +142,7 @@ The container runs as an unprivileged user (uid 1000). When bind-mounting a data
 mkdir -p data && sudo chown -R 1000:1000 data
 ```
 
-**Upgrading from an older (root) image:** an existing data directory is likely root-owned. Depending on which parts are writable, the new image either crash-loops with `DKSend error: Permission denied` in `docker logs`, or starts fine but fails uploads with "Could not store the uploaded file". Both are fixed by the one-time `chown` above (or temporarily run with `--user 0:0` while migrating).
+**Upgrading from an older (root) image:** an existing data directory is likely root-owned, so the new image refuses to start — `docker logs` shows `DKSend error: data directory /data/files is not writable by the server process` with the fix spelled out. Run the one-time `chown` above (or temporarily run with `--user 0:0` while migrating).
 
 Build:
 
