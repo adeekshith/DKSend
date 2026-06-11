@@ -57,12 +57,15 @@ Plain responses add a third `delete:<url>` line after the share URL and `sha256:
 
 ## Authentication
 
-Uploads are open to anyone by default. Set `UPLOAD_TOKEN` to require a shared token for uploads — recommended for instances reachable from the internet:
+Uploads are open to anyone by default. Set `UPLOAD_TOKEN` to require a shared token for uploads — recommended for instances reachable from the internet. Both header spellings work:
 
 ```bash
 UPLOAD_TOKEN=change-me cargo run
+curl -H "X-Upload-Token: change-me" --upload-file ./hello.txt http://localhost:3000
 curl -H "Authorization: Bearer change-me" --upload-file ./hello.txt http://localhost:3000
 ```
+
+Prefer `X-Upload-Token` when DKSend sits behind a reverse proxy: proxy auth middleware (basic auth, Authelia, oauth2-proxy, ...) often intercepts the `Authorization` header and rejects the request before it reaches DKSend. The web UI uses `X-Upload-Token` for this reason.
 
 The web UI shows an "Upload token" field when a token is configured. Downloads stay public; anyone with a share link can fetch the file.
 

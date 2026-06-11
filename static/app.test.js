@@ -523,7 +523,7 @@ describe('drag and drop upload', () => {
     assert.ok(!dom.resultDiv.innerHTML.includes('<svg'), 'no svg without the library');
   });
 
-  it('sends Authorization header when the token field is filled', async () => {
+  it('sends the X-Upload-Token header when the token field is filled', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
       makeEvent('drop', { dataTransfer: { files: [file] } }),
@@ -532,10 +532,12 @@ describe('drag and drop upload', () => {
     dom.uploadForm.dispatchEvent(makeEvent('submit'));
     await new Promise((r) => setTimeout(r, 10));
     const [, opts] = ctx.getLastFetch();
-    assert.equal(opts.headers['Authorization'], 'Bearer s3cret');
+    // Not Authorization: reverse-proxy auth middleware intercepts that
+    assert.equal(opts.headers['X-Upload-Token'], 's3cret');
+    assert.equal(opts.headers['Authorization'], undefined);
   });
 
-  it('sends no Authorization header when the token field is empty', async () => {
+  it('sends no token header when the token field is empty', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
       makeEvent('drop', { dataTransfer: { files: [file] } }),
@@ -543,7 +545,7 @@ describe('drag and drop upload', () => {
     dom.uploadForm.dispatchEvent(makeEvent('submit'));
     await new Promise((r) => setTimeout(r, 10));
     const [, opts] = ctx.getLastFetch();
-    assert.equal(opts.headers['Authorization'], undefined);
+    assert.equal(opts.headers['X-Upload-Token'], undefined);
   });
 
   function dispatchPaste(targetDom, files, spy = {}) {

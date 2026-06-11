@@ -516,6 +516,15 @@ fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
     let Some(expected) = config.upload_token.as_deref() else {
         return true;
     };
+    // X-Upload-Token is the proxy-safe spelling: reverse proxies with auth
+    // middleware (basic auth, Authelia, ...) often consume or reject the
+    // Authorization header before the request ever reaches this server.
+    if let Some(token) = headers
+        .get("x-upload-token")
+        .and_then(|value| value.to_str().ok())
+    {
+        return constant_time_eq(token.trim().as_bytes(), expected.as_bytes());
+    }
     let Some(provided) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1762,9 +1771,10 @@ fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str)
     let title = escape_html(&config.brand_title);
     let description = escape_html(&config.brand_description);
     let auth_required = config.upload_token.is_some();
-    // The page only learns whether a token is needed, never the token itself
+    // The page only learns whether a token is needed, never the token itself.
+    // The quickstart shows the proxy-safe header (see upload_authorized).
     let auth_snippet = if auth_required {
-        escape_html(" -H 'Authorization: Bearer <token>'")
+        escape_html(" -H 'X-Upload-Token: <token>'")
     } else {
         String::new()
     };
@@ -2500,6 +2510,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(download_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_succeeds_with_x_upload_token_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let body = "hello";
+        let response = app
+            .oneshot(
+                Request::put("/?name=auth.txt")
+                    .header("content-length", body.len().to_string())
+                    .header("x-upload-token", "s3cret")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn upload_401_with_wrong_x_upload_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = Some("s3cret".to_string());
+        let app = test_app(state);
+
+        let body = "hello";
+        let response = app
+            .oneshot(
+                Request::put("/?name=auth.txt")
+                    .header("content-length", body.len().to_string())
+                    .header("x-upload-token", "wrong")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -3326,7 +3378,7 @@ mod tests {
         config.upload_token = Some("s3cret".to_string());
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="true""#));
-        assert!(html.contains("Authorization: Bearer"), "quickstart should show the auth header");
+        assert!(html.contains("X-Upload-Token"), "quickstart should show the auth header");
         assert!(!html.contains("s3cret"), "the token itself must never reach the page");
     }
 
@@ -3342,7 +3394,7 @@ mod tests {
         let config = test_config(PathBuf::from("./data"));
         let html = render_upload_page(&templates, &config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
-        assert!(!html.contains("Authorization: Bearer"));
+        assert!(!html.contains("X-Upload-Token"));
     }
 
     #[test]
