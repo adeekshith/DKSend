@@ -1,30 +1,19 @@
 :root {
   color-scheme: light dark;
-  --bg: #f4f4f2;
-  --card: #ffffff;
-  --ink: #1c1c1a;
-  --accent: #2563eb;
-  --accent-dark: #1d4ed8;
-  --muted: #6b6b63;
-  --stroke: #d7d7d2;
-  --shadow: 0 10px 30px rgba(28, 28, 26, 0.08);
-  --code-bg: #1a1a19;
-  --code-ink: #f2f2ef;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #10100f;
-    --card: #181816;
-    --ink: #f1f1ed;
-    --accent: #6ea8ff;
-    --accent-dark: #93c0ff;
-    --muted: #a7a79c;
-    --stroke: #2a2a27;
-    --shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
-    --code-bg: #0b0b0a;
-    --code-ink: #f1f1ed;
-  }
+  /* One source of truth per token via light-dark(); the element's used
+     color-scheme (inherited `light dark` here) picks the value. */
+  --bg: light-dark(#f4f4f2, #10100f);
+  --card: light-dark(#ffffff, #181816);
+  --ink: light-dark(#1c1c1a, #f1f1ed);
+  --accent: light-dark(#2563eb, #6ea8ff);
+  --accent-dark: light-dark(#1d4ed8, #93c0ff);
+  --muted: light-dark(#6b6b63, #a7a79c);
+  --stroke: light-dark(#d7d7d2, #2a2a27);
+  /* light-dark() only takes colors, so the shadow geometry is shared
+     (was 12px offset in dark — an imperceptible 2px change). */
+  --shadow: 0 10px 30px light-dark(rgba(28, 28, 26, 0.08), rgba(0, 0, 0, 0.4));
+  --code-bg: light-dark(#1a1a19, #0b0b0a);
+  --code-ink: light-dark(#f2f2ef, #f1f1ed);
 }
 
 * {
@@ -241,7 +230,7 @@ button:hover,
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  color: var(--muted, #666);
+  color: var(--muted);
   white-space: nowrap;
   min-width: 64px;
   text-align: right;
