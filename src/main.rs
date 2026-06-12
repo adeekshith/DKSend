@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, get_service, post},
     Router,
@@ -171,6 +171,25 @@ fn client_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
         .filter(|value| !value.is_empty())
         .or_else(|| addr.map(|value| value.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+// Infallible peer-address extractor. axum 0.8 dropped the blanket
+// Option<ConnectInfo> support (ConnectInfo isn't an OptionalFromRequestParts),
+// so this preserves the old behavior: Some(addr) when served with connect
+// info, None under tower oneshot tests that don't set it.
+struct ClientAddr(Option<SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| *addr),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -381,18 +400,18 @@ fn build_router(state: AppState) -> Router {
         .route("/", get(upload_page).put(upload_handler))
         .route("/healthz", get(healthz))
         .nest_service("/static", static_service)
-        .route("/raw/:code", get(raw_download_code))
-        .route("/raw/:code/:filename", get(raw_download_named))
+        .route("/raw/{code}", get(raw_download_code))
+        .route("/raw/{code}/{filename}", get(raw_download_named))
         .route("/admin", get(admin_page).post(admin_list_action))
-        .route("/admin/delete/:code", post(admin_delete_action))
-        .route("/delete/:code", get(delete_confirm_page).post(delete_form_action))
+        .route("/admin/delete/{code}", post(admin_delete_action))
+        .route("/delete/{code}", get(delete_confirm_page).post(delete_form_action))
         .route(
-            "/:code",
+            "/{code}",
             get(download_page_code)
                 .put(upload_handler_named)
                 .delete(delete_api),
         )
-        .route("/:code/:filename", get(download_page_named))
+        .route("/{code}/{filename}", get(download_page_named))
         .with_state(state)
 }
 
@@ -545,17 +564,17 @@ fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
 
 async fn upload_handler(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Query(params): Query<UploadQuery>,
     body: Body,
 ) -> Response {
-    handle_upload(state, connect_info, headers, params, body).await
+    handle_upload(state, client_addr, headers, params, body).await
 }
 
 async fn upload_handler_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(filename): Path<String>,
     Query(mut params): Query<UploadQuery>,
@@ -569,18 +588,18 @@ async fn upload_handler_named(
     {
         params.name = Some(filename);
     }
-    handle_upload(state, connect_info, headers, params, body).await
+    handle_upload(state, client_addr, headers, params, body).await
 }
 
 async fn handle_upload(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     params: UploadQuery,
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.upload_limiter {
         if !limiter.allow(&client) {
@@ -868,30 +887,30 @@ async fn healthz(State(state): State<AppState>) -> Response {
 
 async fn download_page_code(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    download_page(state, connect_info, headers, code, None).await
+    download_page(state, client_addr, headers, code, None).await
 }
 
 async fn download_page_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path((code, filename)): Path<(String, String)>,
 ) -> Response {
-    download_page(state, connect_info, headers, code, Some(filename)).await
+    download_page(state, client_addr, headers, code, Some(filename)).await
 }
 
 async fn download_page(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     code: String,
     filename: Option<String>,
 ) -> Response {
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
@@ -964,29 +983,29 @@ async fn download_page(
 
 async fn raw_download_code(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    raw_download(state, connect_info, headers, code).await
+    raw_download(state, client_addr, headers, code).await
 }
 
 async fn raw_download_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path((code, _filename)): Path<(String, String)>,
 ) -> Response {
-    raw_download(state, connect_info, headers, code).await
+    raw_download(state, client_addr, headers, code).await
 }
 
 async fn raw_download(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     code: String,
 ) -> Response {
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
@@ -1120,14 +1139,14 @@ fn delete_outcome_parts(outcome: &Result<DeleteOutcome, anyhow::Error>) -> (&'st
 
 async fn delete_api(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     Query(params): Query<DeleteQuery>,
 ) -> Response {
     let token = params.token.unwrap_or_default();
     let outcome = perform_delete(&state, &code, &token).await;
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     let (status, label) = delete_outcome_parts(&outcome);
     log_access(
         &state.config,
@@ -1199,13 +1218,13 @@ async fn delete_confirm_page(
 
 async fn delete_form_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<DeleteForm>,
 ) -> Response {
     let outcome = perform_delete(&state, &code, &form.token).await;
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     let (status, label) = delete_outcome_parts(&outcome);
     log_access(
         &state.config,
@@ -1277,14 +1296,14 @@ async fn admin_page(State(state): State<AppState>) -> Response {
 
 async fn admin_list_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     axum::Form(form): axum::Form<AdminForm>,
 ) -> Response {
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
             log_access(&state.config, "admin", &[("ip", &client), ("status", "429")]);
@@ -1311,7 +1330,7 @@ async fn admin_list_action(
 
 async fn admin_delete_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<AdminForm>,
@@ -1319,7 +1338,7 @@ async fn admin_delete_action(
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
             log_access(
