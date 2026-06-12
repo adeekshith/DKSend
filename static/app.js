@@ -7,6 +7,9 @@ const copyText = async (text) => {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (_) {
+    // Insecure-context fallback, NOT a legacy-browser one: navigator.clipboard
+    // is undefined on plain http:// LAN IPs (it needs https or localhost) in
+    // every current browser. Self-hosters serve over http, so keep this.
     const textarea = document.createElement('textarea');
     textarea.value = text;
     textarea.style.position = 'fixed';
@@ -206,7 +209,9 @@ if (uploadForm) {
     return idx === 0 ? `${bytes} ${units[idx]}` : `${size.toFixed(1)} ${units[idx]}`;
   };
 
-  // XHR instead of fetch: only XMLHttpRequest exposes upload progress events
+  // XHR instead of fetch: only XMLHttpRequest exposes upload progress events.
+  // fetch() upload progress (duplex streaming request bodies) is still
+  // Chromium-only and HTTPS-only as of 2026, so XHR stays.
   const uploadFile = (file, { name, expires, token, onProgress }) =>
     new Promise((resolve, reject) => {
       const params = new URLSearchParams();
