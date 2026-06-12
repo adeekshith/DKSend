@@ -4,7 +4,7 @@
 #   docker run --rm dksend-e2e
 
 # ── Stage 1: build the server binary ────────────────────────────────────────
-FROM rust:1.92-alpine AS builder
+FROM rust:1.96-alpine AS builder
 
 RUN apk add --no-cache musl-dev build-base
 
