@@ -8,7 +8,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -1061,7 +1061,7 @@ async fn raw_download(
 
 fn generate_delete_token() -> String {
     // 62^32 possibilities: long enough that no uniqueness check is needed
-    rand::thread_rng()
+    rand::rng()
         .sample_iter(Alphanumeric)
         .take(32)
         .map(char::from)
@@ -1621,7 +1621,7 @@ async fn generate_code(pool: &Pool<Sqlite>, config: &AppConfig) -> Result<String
 }
 
 fn random_code(length: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut code = String::with_capacity(length);
     while code.len() < length {
         let ch = rng.sample(Alphanumeric) as char;
