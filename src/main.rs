@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use rand::{distr::Alphanumeric, RngExt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
 use std::collections::HashMap;
@@ -764,7 +765,13 @@ async fn handle_upload(
         hasher.update(&chunk);
     }
 
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    // sha2 0.11's finalize() returns a hybrid_array::Array, which (unlike the
+    // old generic_array) has no LowerHex impl, so format it byte by byte.
+    let digest = hasher.finalize();
+    let mut sha256_hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(sha256_hex, "{byte:02x}");
+    }
     let now = Utc::now();
     let expires_at = now + ChronoDuration::from_std(expiry).unwrap_or_else(|_| ChronoDuration::seconds(0));
     let stored_path = file_path.to_string_lossy().to_string();
