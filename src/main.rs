@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{AssertSqlSafe, Pool, Row, Sqlite};
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -1451,10 +1451,14 @@ fn record_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<UploadRecord, anyhow
 }
 
 async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
-    let row = sqlx::query(&format!("SELECT {UPLOAD_COLUMNS} FROM uploads WHERE code = ?"))
-        .bind(code)
-        .fetch_optional(pool)
-        .await?;
+    // AssertSqlSafe: the only interpolated value is the UPLOAD_COLUMNS const,
+    // not user input (sqlx 0.9 requires impl SqlSafeStr for query()).
+    let row = sqlx::query(AssertSqlSafe(format!(
+        "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE code = ?"
+    )))
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
 
     let Some(row) = row else {
         return Ok(None);
@@ -1464,9 +1468,9 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
 }
 
 async fn fetch_active_uploads(pool: &Pool<Sqlite>) -> Result<Vec<UploadRecord>, anyhow::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE expires_at > ? ORDER BY created_at DESC"
-    ))
+    )))
     .bind(Utc::now().to_rfc3339())
     .fetch_all(pool)
     .await?;
