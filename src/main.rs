@@ -1,18 +1,19 @@
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, get_service, post},
     Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{AssertSqlSafe, Pool, Row, Sqlite};
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -170,6 +171,25 @@ fn client_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
         .filter(|value| !value.is_empty())
         .or_else(|| addr.map(|value| value.ip().to_string()))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+// Infallible peer-address extractor. axum 0.8 dropped the blanket
+// Option<ConnectInfo> support (ConnectInfo isn't an OptionalFromRequestParts),
+// so this preserves the old behavior: Some(addr) when served with connect
+// info, None under tower oneshot tests that don't set it.
+struct ClientAddr(Option<SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| *addr),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -380,18 +400,18 @@ fn build_router(state: AppState) -> Router {
         .route("/", get(upload_page).put(upload_handler))
         .route("/healthz", get(healthz))
         .nest_service("/static", static_service)
-        .route("/raw/:code", get(raw_download_code))
-        .route("/raw/:code/:filename", get(raw_download_named))
+        .route("/raw/{code}", get(raw_download_code))
+        .route("/raw/{code}/{filename}", get(raw_download_named))
         .route("/admin", get(admin_page).post(admin_list_action))
-        .route("/admin/delete/:code", post(admin_delete_action))
-        .route("/delete/:code", get(delete_confirm_page).post(delete_form_action))
+        .route("/admin/delete/{code}", post(admin_delete_action))
+        .route("/delete/{code}", get(delete_confirm_page).post(delete_form_action))
         .route(
-            "/:code",
+            "/{code}",
             get(download_page_code)
                 .put(upload_handler_named)
                 .delete(delete_api),
         )
-        .route("/:code/:filename", get(download_page_named))
+        .route("/{code}/{filename}", get(download_page_named))
         .with_state(state)
 }
 
@@ -544,17 +564,17 @@ fn upload_authorized(headers: &HeaderMap, config: &AppConfig) -> bool {
 
 async fn upload_handler(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Query(params): Query<UploadQuery>,
     body: Body,
 ) -> Response {
-    handle_upload(state, connect_info, headers, params, body).await
+    handle_upload(state, client_addr, headers, params, body).await
 }
 
 async fn upload_handler_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(filename): Path<String>,
     Query(mut params): Query<UploadQuery>,
@@ -568,18 +588,18 @@ async fn upload_handler_named(
     {
         params.name = Some(filename);
     }
-    handle_upload(state, connect_info, headers, params, body).await
+    handle_upload(state, client_addr, headers, params, body).await
 }
 
 async fn handle_upload(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     params: UploadQuery,
     body: Body,
 ) -> Response {
     let response_mode = upload_response_mode(&headers, &params);
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.upload_limiter {
         if !limiter.allow(&client) {
@@ -764,7 +784,13 @@ async fn handle_upload(
         hasher.update(&chunk);
     }
 
-    let sha256_hex = format!("{:x}", hasher.finalize());
+    // sha2 0.11's finalize() returns a hybrid_array::Array, which (unlike the
+    // old generic_array) has no LowerHex impl, so format it byte by byte.
+    let digest = hasher.finalize();
+    let mut sha256_hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(sha256_hex, "{byte:02x}");
+    }
     let now = Utc::now();
     let expires_at = now + ChronoDuration::from_std(expiry).unwrap_or_else(|_| ChronoDuration::seconds(0));
     let stored_path = file_path.to_string_lossy().to_string();
@@ -861,30 +887,30 @@ async fn healthz(State(state): State<AppState>) -> Response {
 
 async fn download_page_code(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    download_page(state, connect_info, headers, code, None).await
+    download_page(state, client_addr, headers, code, None).await
 }
 
 async fn download_page_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path((code, filename)): Path<(String, String)>,
 ) -> Response {
-    download_page(state, connect_info, headers, code, Some(filename)).await
+    download_page(state, client_addr, headers, code, Some(filename)).await
 }
 
 async fn download_page(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     code: String,
     filename: Option<String>,
 ) -> Response {
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
@@ -957,29 +983,29 @@ async fn download_page(
 
 async fn raw_download_code(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Response {
-    raw_download(state, connect_info, headers, code).await
+    raw_download(state, client_addr, headers, code).await
 }
 
 async fn raw_download_named(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path((code, _filename)): Path<(String, String)>,
 ) -> Response {
-    raw_download(state, connect_info, headers, code).await
+    raw_download(state, client_addr, headers, code).await
 }
 
 async fn raw_download(
     state: AppState,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    client_addr: Option<SocketAddr>,
     headers: HeaderMap,
     code: String,
 ) -> Response {
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
 
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
@@ -1061,7 +1087,7 @@ async fn raw_download(
 
 fn generate_delete_token() -> String {
     // 62^32 possibilities: long enough that no uniqueness check is needed
-    rand::thread_rng()
+    rand::rng()
         .sample_iter(Alphanumeric)
         .take(32)
         .map(char::from)
@@ -1113,14 +1139,14 @@ fn delete_outcome_parts(outcome: &Result<DeleteOutcome, anyhow::Error>) -> (&'st
 
 async fn delete_api(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     Query(params): Query<DeleteQuery>,
 ) -> Response {
     let token = params.token.unwrap_or_default();
     let outcome = perform_delete(&state, &code, &token).await;
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     let (status, label) = delete_outcome_parts(&outcome);
     log_access(
         &state.config,
@@ -1192,13 +1218,13 @@ async fn delete_confirm_page(
 
 async fn delete_form_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<DeleteForm>,
 ) -> Response {
     let outcome = perform_delete(&state, &code, &form.token).await;
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     let (status, label) = delete_outcome_parts(&outcome);
     log_access(
         &state.config,
@@ -1270,14 +1296,14 @@ async fn admin_page(State(state): State<AppState>) -> Response {
 
 async fn admin_list_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     axum::Form(form): axum::Form<AdminForm>,
 ) -> Response {
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
             log_access(&state.config, "admin", &[("ip", &client), ("status", "429")]);
@@ -1304,7 +1330,7 @@ async fn admin_list_action(
 
 async fn admin_delete_action(
     State(state): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
+    ClientAddr(client_addr): ClientAddr,
     headers: HeaderMap,
     Path(code): Path<String>,
     axum::Form(form): axum::Form<AdminForm>,
@@ -1312,7 +1338,7 @@ async fn admin_delete_action(
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    let client = client_ip(&headers, connect_info.as_ref().map(|ConnectInfo(addr)| addr));
+    let client = client_ip(&headers, client_addr.as_ref());
     if let Some(limiter) = &state.lookup_limiter {
         if !limiter.allow(&client) {
             log_access(
@@ -1425,10 +1451,14 @@ fn record_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<UploadRecord, anyhow
 }
 
 async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRecord>, anyhow::Error> {
-    let row = sqlx::query(&format!("SELECT {UPLOAD_COLUMNS} FROM uploads WHERE code = ?"))
-        .bind(code)
-        .fetch_optional(pool)
-        .await?;
+    // AssertSqlSafe: the only interpolated value is the UPLOAD_COLUMNS const,
+    // not user input (sqlx 0.9 requires impl SqlSafeStr for query()).
+    let row = sqlx::query(AssertSqlSafe(format!(
+        "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE code = ?"
+    )))
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
 
     let Some(row) = row else {
         return Ok(None);
@@ -1438,9 +1468,9 @@ async fn fetch_upload(pool: &Pool<Sqlite>, code: &str) -> Result<Option<UploadRe
 }
 
 async fn fetch_active_uploads(pool: &Pool<Sqlite>) -> Result<Vec<UploadRecord>, anyhow::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE expires_at > ? ORDER BY created_at DESC"
-    ))
+    )))
     .bind(Utc::now().to_rfc3339())
     .fetch_all(pool)
     .await?;
@@ -1621,7 +1651,7 @@ async fn generate_code(pool: &Pool<Sqlite>, config: &AppConfig) -> Result<String
 }
 
 fn random_code(length: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut code = String::with_capacity(length);
     while code.len() < length {
         let ch = rng.sample(Alphanumeric) as char;
