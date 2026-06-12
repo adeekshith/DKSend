@@ -17,7 +17,7 @@ COPY migrations ./migrations
 RUN cargo build
 
 # ── Stage 2: run Playwright tests ───────────────────────────────────────────
-FROM mcr.microsoft.com/playwright:v1.58.2-noble
+FROM mcr.microsoft.com/playwright:v1.60.0-noble
 
 WORKDIR /app
 
