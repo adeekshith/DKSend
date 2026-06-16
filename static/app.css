@@ -316,6 +316,38 @@ button:hover,
   overflow: auto;
 }
 
+.content-block {
+  margin-top: 20px;
+  text-align: left;
+}
+
+.content-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.content-head button {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.content-block pre {
+  margin: 0;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  padding: 16px;
+  border-radius: 12px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
 .warn {
   color: color-mix(in srgb, var(--accent), var(--ink) 20%);
   font-weight: 600;

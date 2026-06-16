@@ -60,11 +60,18 @@ for (const el of qrHosts) {
 }
 
 document.addEventListener('click', async (event) => {
-  const button = event.target.closest('[data-copy]');
+  // data-copy carries the text directly; data-copy-from="#id" copies that
+  // element's textContent (used for the inline file contents, so a large
+  // body isn't duplicated into an attribute).
+  const button = event.target.closest('[data-copy], [data-copy-from]');
   if (!button) {
     return;
   }
-  const text = button.getAttribute('data-copy');
+  let text = button.getAttribute('data-copy');
+  if (text === null) {
+    const target = document.querySelector(button.getAttribute('data-copy-from'));
+    text = target ? target.textContent : '';
+  }
   if (!text) {
     return;
   }

@@ -74,6 +74,8 @@ The web UI shows an "Upload token" field when a token is configured. Downloads s
 - Web page: `GET /{code}/{filename}` — shows filename, size, expiry, a QR code of the share link (handy for phone-to-laptop transfers), and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`. The upload result panel shows the same QR code.
 - Raw file: `GET /raw/{code}/{filename}` — responses carry the exact `Content-Length`, so browsers and `curl` show real download progress.
 
+Text uploads (anything that is valid UTF-8 and under 256 KB — pasted notes, configs, `.log`/`.csv` files) render inline on the download page with a copy button, so recipients can read them without downloading. Larger or binary files keep the download-only view.
+
 ## Delete
 
 Every upload gets its own secret delete token, returned as `delete_token`/`delete_url` and shown in the web UI. Either:
