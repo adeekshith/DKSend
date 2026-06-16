@@ -978,7 +978,22 @@ async fn download_page(
         "page",
         &[("ip", &client), ("status", "200"), ("code", &code)],
     );
-    Html(render_download_page(&record, &base_url, &state.templates, &state.config)).into_response()
+    // Read small files so text can be shown inline; skip the I/O for anything
+    // larger to avoid pulling a big upload into memory on a page view.
+    let contents = if record.size_bytes <= INLINE_TEXT_LIMIT {
+        tokio::fs::read(&record.stored_path).await.ok()
+    } else {
+        None
+    };
+    let inline = contents.as_deref().and_then(inline_text);
+    Html(render_download_page(
+        &record,
+        &base_url,
+        inline,
+        &state.templates,
+        &state.config,
+    ))
+    .into_response()
 }
 
 async fn raw_download_code(
@@ -1878,9 +1893,21 @@ fn render_delete_page(record: &UploadRecord, templates: &Templates, config: &App
     )
 }
 
+// Cap on how much of an upload we read to show inline on the download page.
+const INLINE_TEXT_LIMIT: u64 = 256 * 1024;
+
+// Returns the upload's text when it is displayable: valid UTF-8 and not
+// binary (a NUL byte is the cheap, reliable "this is binary" signal).
+fn inline_text(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .filter(|text| !text.contains('\0'))
+}
+
 fn render_download_page(
     record: &UploadRecord,
     base_url: &str,
+    inline: Option<&str>,
     templates: &Templates,
     config: &AppConfig,
 ) -> String {
@@ -1901,6 +1928,17 @@ fn render_download_page(
             r#"<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
         )
     };
+    // The text is escaped into a <pre>; the copy button reads it back from the
+    // element via data-copy-from, so the content isn't duplicated into an attr.
+    // Note: r##"..."## — the markup contains `"#` (data-copy-from="#...),
+    // which would close a plain r#"..."# raw string early.
+    let content_block = match inline {
+        Some(text) => format!(
+            r##"<div class="content-block"><div class="content-head"><span class="row-label">Contents</span><button type="button" data-copy-from="#file-contents">Copy</button></div><pre id="file-contents">{}</pre></div>"##,
+            escape_html(text)
+        ),
+        None => String::new(),
+    };
 
     render_template(
         &templates.download,
@@ -1915,6 +1953,7 @@ fn render_download_page(
             ("{{download_page_url}}", download_page_url),
             ("{{curl_url}}", download_url),
             ("{{sha256_block}}", sha256_block),
+            ("{{content_block}}", content_block),
         ],
     )
 }
@@ -2263,6 +2302,83 @@ mod tests {
         assert!(html.contains("SHA-256"), "download page should label the hash row");
         assert!(html.contains(">Page<"), "download page should label the page URL row");
         assert!(html.contains(">Raw<"), "download page should label the raw URL row");
+    }
+
+    #[test]
+    fn inline_text_accepts_utf8_and_rejects_binary() {
+        assert_eq!(inline_text(b"hello"), Some("hello"));
+        assert_eq!(inline_text("héllo".as_bytes()), Some("héllo"));
+        assert_eq!(inline_text(b""), Some(""));
+        assert_eq!(inline_text(b"a\0b"), None, "NUL byte means binary");
+        assert_eq!(inline_text(&[0xff, 0xfe, 0xfd]), None, "invalid UTF-8");
+    }
+
+    // Uploads `body` as a file and returns the rendered download page HTML.
+    async fn download_page_html(state: &AppState, name: &str, body: Vec<u8>) -> String {
+        let len = body.len();
+        let upload_resp = test_app(state.clone())
+            .oneshot(
+                Request::put(format!("/?name={name}"))
+                    .header("content-length", len.to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload_resp.status(), StatusCode::CREATED);
+        let bytes = upload_resp.into_body().collect().await.unwrap().to_bytes();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let code = data["code"].as_str().unwrap();
+
+        let page_resp = test_app(state.clone())
+            .oneshot(
+                Request::get(format!("/{code}/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_resp.status(), StatusCode::OK);
+        let html_bytes = page_resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(html_bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn download_page_renders_text_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let html = download_page_html(&state, "note.txt", b"hello inline world".to_vec()).await;
+        assert!(html.contains("content-block"), "text upload should get a content block");
+        assert!(html.contains("hello inline world"), "the text should be shown inline");
+        assert!(html.contains("data-copy-from=\"#file-contents\""), "copy control present");
+    }
+
+    #[tokio::test]
+    async fn download_page_escapes_inline_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let html = download_page_html(&state, "xss.txt", b"<script>alert(1)</script>".to_vec()).await;
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "must be escaped");
+        assert!(!html.contains("<script>alert(1)</script>"), "raw tag must never appear");
+    }
+
+    #[tokio::test]
+    async fn download_page_no_inline_for_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let html = download_page_html(&state, "blob.bin", vec![0x00, 0x01, 0x02, 0xff]).await;
+        assert!(!html.contains("content-block"), "binary upload must not render inline");
+    }
+
+    #[tokio::test]
+    async fn download_page_no_inline_over_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        // Raise the per-file cap so the oversized text upload itself is accepted
+        state.config.max_file_size = INLINE_TEXT_LIMIT + 1024;
+        let big = vec![b'a'; (INLINE_TEXT_LIMIT + 1) as usize];
+        let html = download_page_html(&state, "big.txt", big).await;
+        assert!(!html.contains("content-block"), "text over the cap must not render inline");
     }
 
     #[tokio::test]

@@ -69,10 +69,16 @@ Prefer `X-Upload-Token` when DKSend sits behind a reverse proxy: proxy auth midd
 
 The web UI shows an "Upload token" field when a token is configured. Downloads stay public; anyone with a share link can fetch the file.
 
+## Share text
+
+The web UI has a **File / Text** toggle. Switch to **Text**, paste or type into the box, and share the link — the snippet is stored as a `text/plain` upload and rides the same expiry, delete, and size limits as a file. Recipients see it rendered inline on the download page (see below), with a copy button.
+
 ## Download
 
 - Web page: `GET /{code}/{filename}` — shows filename, size, expiry, a QR code of the share link (handy for phone-to-laptop transfers), and the SHA-256 hash with a copy button so recipients can verify with `shasum -a 256 file`. The upload result panel shows the same QR code.
 - Raw file: `GET /raw/{code}/{filename}` — responses carry the exact `Content-Length`, so browsers and `curl` show real download progress.
+
+Text uploads (anything that is valid UTF-8 and under 256 KB — pasted notes, configs, `.log`/`.csv` files) render inline on the download page with a copy button, so recipients can read them without downloading. Larger or binary files keep the download-only view.
 
 ## Delete
 
