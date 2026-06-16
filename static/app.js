@@ -84,10 +84,24 @@ if (uploadForm) {
   const filenameInput = document.getElementById('filename');
   const expirySelect = document.getElementById('expiry');
   const tokenInput = document.getElementById('token');
+  const textInput = document.getElementById('text-input');
+  const modeTabs = uploadForm.querySelectorAll?.('[data-mode-set]') || [];
   // Selected files as { file, name } pairs: paste assigns generated names,
   // everything else keeps the file's own name
   let selectedFiles = [];
   let cardsHtml = '';
+
+  // File vs Text input mode. CSS shows/hides the drop zone and textarea
+  // off the form's data-mode attribute (same pattern as data-auth-required).
+  const setMode = (mode) => {
+    uploadForm.dataset.mode = mode;
+    for (const tab of modeTabs) {
+      tab.setAttribute('aria-selected', tab.getAttribute('data-mode-set') === mode ? 'true' : 'false');
+    }
+  };
+  for (const tab of modeTabs) {
+    tab.addEventListener('click', () => setMode(tab.getAttribute('data-mode-set')));
+  }
   const dropLabel = dropZone?.querySelector('span');
   const DEFAULT_DROP_LABEL = dropLabel?.textContent || 'Drag & drop or click to choose a file';
   const DEFAULT_OVERRIDE_PLACEHOLDER = 'Leave blank to keep original';
@@ -122,6 +136,7 @@ if (uploadForm) {
     uploadForm.reset();
     cardsHtml = '';
     setSelectedFiles([]);
+    setMode('file');
     if (result) {
       result.classList.add('hidden');
       result.innerHTML = '';
@@ -323,13 +338,27 @@ if (uploadForm) {
 
   uploadForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const entries = selectedFiles.length ? selectedFiles : wrapFiles(fileInput?.files);
+    const override = (filenameInput?.value || '').trim();
+
+    let entries;
+    if (uploadForm.dataset.mode === 'text') {
+      // Text mode: wrap the textarea as a text/plain blob and reuse the file
+      // path. uploadFile only reads .size and sends the body (the name rides
+      // the ?name= param), so a Blob is enough — no File global needed.
+      const text = textInput?.value || '';
+      if (!text.trim()) {
+        return;
+      }
+      const blob = new Blob([text], { type: 'text/plain' });
+      entries = [{ file: blob, name: override || 'note.txt' }];
+    } else {
+      entries = selectedFiles.length ? selectedFiles : wrapFiles(fileInput?.files);
+    }
     if (!entries.length) {
       return;
     }
 
     const token = (tokenInput?.value || '').trim();
-    const override = (filenameInput?.value || '').trim();
     cardsHtml = '';
     let successCount = 0;
 

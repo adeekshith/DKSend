@@ -96,14 +96,16 @@ function makeDom() {
   const expirySelect = new MockElement('select', { id: 'expiry' });
   expirySelect.value = '';
   const tokenInput = new MockElement('input', { id: 'token', type: 'password' });
+  const textInput = new MockElement('textarea', { id: 'text-input' });
 
   const submitBtn = new MockElement('button', { id: 'submit-btn', type: 'submit' });
   submitBtn.textContent = 'Upload';
   const uploadForm = new MockElement('form', { id: 'upload-form' });
+  uploadForm.dataset.mode = 'file';
   uploadForm.children.push(submitBtn);
   const resultDiv = new MockElement('div', { id: 'result' });
 
-  const elements = { 'upload-form': uploadForm, file: fileInput, 'drop-zone': dropZone, filename: filenameInput, expiry: expirySelect, token: tokenInput, result: resultDiv };
+  const elements = { 'upload-form': uploadForm, file: fileInput, 'drop-zone': dropZone, filename: filenameInput, expiry: expirySelect, token: tokenInput, 'text-input': textInput, result: resultDiv };
 
   const document = {
     getElementById(id) { return elements[id] || null; },
@@ -121,7 +123,7 @@ function makeDom() {
     execCommand() { return true; },
   };
 
-  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, tokenInput, resultDiv, spanEl, submitBtn };
+  return { document, uploadForm, fileInput, dropZone, filenameInput, expirySelect, tokenInput, textInput, resultDiv, spanEl, submitBtn };
 }
 
 const SUCCESS_JSON = {
@@ -706,6 +708,35 @@ describe('drag and drop upload', () => {
     assert.ok(!dom2.resultDiv.innerHTML.includes('<h3>Uploaded</h3>'));
   });
 
+  it('shares typed text in text mode with the default name', async () => {
+    dom.uploadForm.dataset.mode = 'text';
+    dom.textInput.value = 'hello shared note';
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [url, opts] = ctx.getLastFetch();
+    assert.ok(url.includes('name=note.txt'), `url was ${url}`);
+    assert.equal(opts.method, 'PUT');
+    assert.ok(opts.body, 'a body blob should be sent');
+  });
+
+  it('honors the filename override in text mode', async () => {
+    dom.uploadForm.dataset.mode = 'text';
+    dom.textInput.value = 'config contents';
+    dom.filenameInput.value = 'config.yaml';
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    const [url] = ctx.getLastFetch();
+    assert.ok(url.includes('name=config.yaml'), `url was ${url}`);
+  });
+
+  it('does not submit empty text in text mode', async () => {
+    dom.uploadForm.dataset.mode = 'text';
+    dom.textInput.value = '   \n  ';
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx.getLastFetch(), null, 'whitespace-only text must not upload');
+  });
+
   it('includes expiry in upload request', async () => {
     const file = { name: 'f.txt', size: 10 };
     dom.dropZone.dispatchEvent(
@@ -757,6 +788,13 @@ describe('upload.html template', () => {
   it('file input allows multiple files', () => {
     const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
     assert.ok(/<input[^>]*type="file"[^>]*multiple/.test(html));
+  });
+
+  it('has a File/Text mode toggle and a text input, defaulting to file', () => {
+    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    assert.ok(html.includes('data-mode="file"'), 'form defaults to file mode');
+    assert.ok(html.includes('data-mode-set="text"'), 'text tab present');
+    assert.ok(html.includes('id="text-input"'), 'textarea present');
   });
 
   it('loads the QR library before app.js', () => {
