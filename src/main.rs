@@ -3036,6 +3036,40 @@ mod tests {
         assert!(html.contains(&format!(r#"action="/admin/delete/{code_a}""#)));
     }
 
+    // The static dir is served wholesale, so anything dropped in it ships to
+    // production and is publicly fetchable. Test code must not live there.
+    #[tokio::test]
+    async fn static_dir_serves_no_test_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(
+                Request::get("/static/app.test.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the JS unit test must not be reachable over HTTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_dir_still_serves_page_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/static/app.css").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn admin_list_excludes_expired_uploads() {
         let tmp = tempfile::tempdir().unwrap();

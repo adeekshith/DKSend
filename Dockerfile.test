@@ -12,6 +12,7 @@ COPY src ./src
 COPY static ./static
 COPY migrations ./migrations
 COPY tests/cli.rs ./tests/cli.rs
+COPY tests/unit ./tests/unit
 
 RUN cargo test
-RUN node --test static/app.test.js
+RUN node --test tests/unit/app.test.mjs

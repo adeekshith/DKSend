@@ -180,7 +180,7 @@ function makeFakeXhrClass(getResponse, manual) {
 function loadApp(dom, opts = {}) {
   const { document } = dom;
   // Inject globals and evaluate app.js
-  const code = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const code = readFileSync(new URL('../../static/app.js', import.meta.url), 'utf8');
   const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', 'XMLHttpRequest', code);
   const responses = opts.responses ? [...opts.responses] : [];
   const getResponse = () => (responses.length ? responses.shift() : { status: 200, json: SUCCESS_JSON });
@@ -752,59 +752,59 @@ describe('drag and drop upload', () => {
 
 describe('upload.html template', () => {
   it('file input does not have required attribute', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     // The file input should not be required so drag-and-drop works
     assert.ok(!html.match(/<input[^>]*type="file"[^>]*required/),
       'file input must not have required attribute');
   });
 
   it('has drop-zone element', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="drop-zone"'));
   });
 
   it('has upload form', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="upload-form"'));
   });
 
   it('keeps the CLI quickstart docs and drops the Raw downloads blurb', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
     assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
   });
 
   it('injects expiry options from the server', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('{{expiry_options}}'), 'expiry options come from server config');
     assert.ok(!html.includes('value="30m"'), 'no hardcoded expiry options');
   });
 
   it('exposes the configured max file size on the form', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
   });
 
   it('file input allows multiple files', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(/<input[^>]*type="file"[^>]*multiple/.test(html));
   });
 
   it('has a File/Text mode toggle and a text input, defaulting to file', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-mode="file"'), 'form defaults to file mode');
     assert.ok(html.includes('data-mode-set="text"'), 'text tab present');
     assert.ok(html.includes('id="text-input"'), 'textarea present');
   });
 
   it('loads the QR library before app.js', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/upload.html', import.meta.url), 'utf8');
     assert.ok(html.indexOf('/static/qr.js') !== -1);
     assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
   });
 
   it('download page has a QR placeholder and the QR library', () => {
-    const html = readFileSync(new URL('./download.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../static/download.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-qr="{{download_page_url}}"'));
     assert.ok(html.indexOf('/static/qr.js') !== -1);
     assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
