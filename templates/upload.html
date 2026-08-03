@@ -1,16 +1,6 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{{ title }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=12">
-  </head>
-  <body>
-    <main class="shell">
-      <header class="hero">
-        <h1>{{ title }}</h1>
-      </header>
+{% extends "base.html" %}
+
+{% block content %}
       <section class="card">
         <form id="upload-form" data-auth-required="{{ auth_required }}" data-max-file-size="{{ max_file_size }}" data-mode="file">
           <div class="mode-toggle" role="tablist">
@@ -54,8 +44,9 @@
           <pre>curl{{ auth_snippet }} --upload-file ./hello.txt {{ site_url }}</pre>
         </div>
       </section>
-    </main>
+{% endblock %}
+
+{% block scripts %}
     <script src="/static/qr.js?v=1" defer></script>
     <script src="/static/app.js?v=14" defer></script>
-  </body>
-</html>
+{% endblock %}

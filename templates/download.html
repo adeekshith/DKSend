@@ -1,24 +1,17 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{{ title }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=12">
-  </head>
-  <body>
-    <main class="shell">
-      <header class="hero">
-        <h1>{{ title }}</h1>
+{% extends "base.html" %}
+
+{% block hero %}
         <p>{{ description }}</p>
-      </header>
+{% endblock %}
+
+{% block content %}
       <section class="card">
         <div class="file-meta">
           <h2>{{ filename }}</h2>
           <p>{{ size }} · uploaded {{ created_at }}</p>
           <p class="expiry">Expires in {{ expires_in }}</p>
         </div>
-        {% if let Some(text) = inline_text %}
+        {%- if let Some(text) = inline_text %}
         <div class="content-block">
           <div class="content-head">
             <span class="row-label">Contents</span>
@@ -26,7 +19,7 @@
           </div>
           <pre id="file-contents">{{ text }}</pre>
         </div>
-        {% endif %}
+        {%- endif %}
         <div class="actions">
           <a class="primary" href="{{ download_url }}">Download</a>
         </div>
@@ -42,21 +35,22 @@
             <input type="text" readonly value="{{ download_url }}">
             <button type="button" data-copy="{{ download_url }}">Copy</button>
           </div>
-          {% if !sha256_hex.is_empty() %}
+          {%- if !sha256_hex.is_empty() %}
           <div class="link-row hash-row">
             <span class="row-label">SHA-256</span>
             <input type="text" readonly value="{{ sha256_hex }}">
             <button type="button" data-copy="{{ sha256_hex }}">Copy</button>
           </div>
-          {% endif %}
+          {%- endif %}
         </div>
         <div class="code">
           <span>curl</span>
           <pre>curl -O '{{ download_url }}'</pre>
         </div>
       </section>
-    </main>
+{% endblock %}
+
+{% block scripts %}
     <script src="/static/qr.js?v=1" defer></script>
     <script src="/static/app.js?v=14" defer></script>
-  </body>
-</html>
+{% endblock %}
