@@ -1772,6 +1772,11 @@ fn asset_version() -> &'static str {
 // means new head content is one struct field rather than one per page struct.
 struct PageChrome {
     title: String,
+    // BRAND_DESCRIPTION lives here rather than on each page struct: it used to
+    // be passed to the upload page by a render function whose template had no
+    // slot for it, so the configured tagline silently never appeared. Rendering
+    // it from the shared layout means one place decides, for every page.
+    description: String,
     asset_v: &'static str,
 }
 
@@ -1779,6 +1784,7 @@ impl PageChrome {
     fn new(config: &AppConfig) -> Self {
         Self {
             title: config.brand_title.clone(),
+            description: config.brand_description.clone(),
             asset_v: asset_version(),
         }
     }
@@ -1871,7 +1877,6 @@ struct DeleteTemplate {
 #[template(path = "download.html")]
 struct DownloadTemplate {
     chrome: PageChrome,
-    description: String,
     filename: String,
     size: String,
     created_at: String,
@@ -1963,7 +1968,6 @@ fn render_download_page(
     let encoded = urlencoding::encode(&record.original_filename);
     DownloadTemplate {
         chrome: PageChrome::new(config),
-        description: config.brand_description.clone(),
         filename: record.original_filename.clone(),
         size: human_size(record.size_bytes),
         created_at: record.created_at.to_rfc3339(),
@@ -3168,6 +3172,97 @@ mod tests {
         let version = versions.into_iter().next().unwrap();
         assert_eq!(version, asset_version());
         assert!(!version.is_empty(), "assets must carry a version");
+    }
+
+    // render_upload_page passed a description to a template that had no slot
+    // for it, so the documented tagline silently never rendered.
+    #[test]
+    fn upload_page_shows_the_brand_description() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.brand_description = "Fast, friendly file drops.".to_string();
+        let html = render_upload_page(&config, "https://example.com");
+        assert!(
+            html.contains("Fast, friendly file drops."),
+            "BRAND_DESCRIPTION must appear on the landing page"
+        );
+    }
+
+    #[test]
+    fn upload_page_omits_an_empty_description() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.brand_description = String::new();
+        let html = render_upload_page(&config, "https://example.com");
+        assert!(
+            !html.contains("<p></p>"),
+            "an unset description must not leave an empty paragraph"
+        );
+    }
+
+    #[test]
+    fn every_page_carries_a_favicon_and_theme_colour() {
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&config, "https://example.com");
+        // Without a favicon link, /favicon.ico falls through to the {code}
+        // route and renders the 404 page.
+        assert!(html.contains(r#"rel="icon""#), "needs a favicon");
+        assert!(
+            html.contains("prefers-color-scheme: light") && html.contains("prefers-color-scheme: dark"),
+            "needs a theme-color for both schemes"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_page_has_link_preview_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "report.pdf".to_string(),
+            stored_path: String::new(),
+            size_bytes: 2048,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(3),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(html.contains(r#"property="og:title""#));
+        assert!(html.contains(r#"property="og:url""#));
+        assert!(html.contains(r#"name="description""#));
+        assert!(html.contains("report.pdf"));
+    }
+
+    // og:* values ride in attributes, so a quote in a filename would otherwise
+    // end the attribute early.
+    #[tokio::test]
+    async fn link_preview_metadata_escapes_the_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: r#"a" onmouseover="x"#.to_string(),
+            stored_path: String::new(),
+            size_bytes: 10,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(
+            !html.contains(r#"onmouseover="x""#),
+            "a bare quote must not break out of the content attribute"
+        );
+    }
+
+    #[test]
+    fn every_page_links_home() {
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&config, "https://example.com");
+        assert!(
+            html.contains(r#"class="home-link" href="/""#),
+            "the download and admin pages need a way back to the form"
+        );
     }
 
     #[test]

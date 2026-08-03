@@ -6,13 +6,23 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{{ chrome.title }}</title>
+    {#- Inline SVG rather than a file: no extra request, no binary in the repo,
+        and no /favicon.ico falling through to the {code} route's 404 page. -#}
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M16 23V10m0 0l-5 5m5-5l5 5' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+    {#- Without these the mobile browser chrome stays light while the page is
+        near-black, which is very visible on a dark phone. -#}
+    <meta name="theme-color" content="#f4f4f2" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#10100f" media="(prefers-color-scheme: dark)">
     <link rel="stylesheet" href="/static/app.css?v={{ chrome.asset_v }}">
     {%- block head %}{% endblock %}
   </head>
   <body>
     <main class="shell">
       <header class="hero">
-        <h1>{{ chrome.title }}</h1>
+        <h1><a class="home-link" href="/">{{ chrome.title }}</a></h1>
+        {%- if !chrome.description.is_empty() %}
+        <p>{{ chrome.description }}</p>
+        {%- endif %}
         {%- block hero %}{% endblock %}
       </header>
       {%- block content %}{% endblock %}

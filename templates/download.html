@@ -1,7 +1,13 @@
 {% extends "base.html" %}
 
-{% block hero %}
-        <p>{{ description }}</p>
+{%- block head %}
+    {#- This page's URL is what gets pasted into a chat, so it earns a preview
+        card. Values run through the template's automatic escaping. -#}
+    <meta name="description" content="{{ filename }} — {{ size }}, expires in {{ expires_in }}">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="{{ filename }}">
+    <meta property="og:description" content="{{ size }} · expires in {{ expires_in }}">
+    <meta property="og:url" content="{{ download_page_url }}">
 {% endblock %}
 
 {% block content %}
@@ -44,8 +50,11 @@
           {%- endif %}
         </div>
         <div class="code">
-          <span>curl</span>
-          <pre>curl -O '{{ download_url }}'</pre>
+          <div class="content-head">
+            <span>curl</span>
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-from="#curl-command">Copy</button>
+          </div>
+          <pre id="curl-command">curl -O '{{ download_url }}'</pre>
         </div>
       </section>
 {% endblock %}
