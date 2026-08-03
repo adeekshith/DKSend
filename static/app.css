@@ -5,9 +5,17 @@
   --bg: light-dark(#f4f4f2, #10100f);
   --card: light-dark(#ffffff, #181816);
   --ink: light-dark(#1c1c1a, #f1f1ed);
-  --accent: light-dark(#2563eb, #6ea8ff);
-  --accent-dark: light-dark(#1d4ed8, #93c0ff);
   --muted: light-dark(#6b6b63, #a7a79c);
+  /* The accent splits by role, because one token cannot serve both:
+     --accent-hover is a *background* and must darken in both schemes, while
+     --link is *text on a card* and must lighten in dark mode. The old
+     --accent-dark did both, so it lightened for the sake of link text and
+     dropped white-on-accent buttons to 1.87:1 on hover — hovering a button
+     made it harder to read. */
+  --accent: light-dark(#2563eb, #2f6fe0);
+  --accent-hover: light-dark(#1d4ed8, #1e5fd0);
+  --on-accent: #ffffff;
+  --link: light-dark(#1d4ed8, #8fbaff);
   --stroke: light-dark(#d7d7d2, #2a2a27);
   /* light-dark() only takes colors, so the shadow geometry is shared
      (was 12px offset in dark — an imperceptible 2px change). */
@@ -130,7 +138,7 @@ body {
 
 .mode-tab[aria-selected="true"] {
   background: var(--accent);
-  color: #ffffff;
+  color: var(--on-accent);
 }
 
 .mode-tab:hover {
@@ -139,8 +147,8 @@ body {
 }
 
 .mode-tab[aria-selected="true"]:hover {
-  background: var(--accent-dark);
-  color: #ffffff;
+  background: var(--accent-hover);
+  color: var(--on-accent);
 }
 
 .text-row {
@@ -189,7 +197,7 @@ button,
   border-radius: 12px;
   border: none;
   background: var(--accent);
-  color: #ffffff;
+  color: var(--on-accent);
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
@@ -201,8 +209,8 @@ button,
 
 button:hover,
 .primary:hover {
-  background: var(--accent-dark);
-  color: #ffffff;
+  background: var(--accent-hover);
+  color: var(--on-accent);
 }
 
 .result {
@@ -219,7 +227,7 @@ button:hover,
 }
 
 .result a {
-  color: var(--accent-dark);
+  color: var(--link);
   font-weight: 600;
 }
 
@@ -256,7 +264,7 @@ button:hover,
 .result-actions button:hover {
   background: var(--card);
   border-color: var(--accent);
-  color: var(--accent-dark);
+  color: var(--link);
 }
 
 .link-list {
@@ -334,7 +342,7 @@ button:hover,
 }
 
 .expiry {
-  color: color-mix(in srgb, var(--accent-dark), var(--ink) 20%);
+  color: color-mix(in srgb, var(--link), var(--ink) 20%);
   font-weight: 600;
 }
 
@@ -512,12 +520,12 @@ button:hover,
 
 .admin-table td form button:hover {
   border-color: var(--accent);
-  color: var(--accent-dark);
+  color: var(--link);
   background: var(--card);
 }
 
 .admin-table a {
-  color: var(--accent-dark);
+  color: var(--link);
   font-weight: 600;
 }
 

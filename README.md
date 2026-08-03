@@ -247,7 +247,7 @@ cargo test
 JavaScript (frontend unit tests):
 
 ```bash
-node --test tests/unit/app.test.mjs
+node --test "tests/unit/*.test.mjs"
 ```
 
 Playwright (end-to-end browser tests):

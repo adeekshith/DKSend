@@ -32,7 +32,7 @@ jobs:
           node-version: '24'
 
       - name: JS unit tests
-        run: node --test tests/unit/app.test.mjs
+        run: node --test "tests/unit/*.test.mjs"
 
       - name: Install Playwright
         working-directory: tests/e2e

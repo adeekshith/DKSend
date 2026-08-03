@@ -16,4 +16,4 @@ COPY tests/cli.rs ./tests/cli.rs
 COPY tests/unit ./tests/unit
 
 RUN cargo test
-RUN node --test tests/unit/app.test.mjs
+RUN node --test "tests/unit/*.test.mjs"
