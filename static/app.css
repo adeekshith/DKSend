@@ -288,8 +288,25 @@
     text-align: center;
   }
 
+  /* Visually hidden but still rendered, and therefore still focusable. The
+     previous display:none removed the file input from the tab order and the
+     accessibility tree entirely, so a keyboard-only user could not open the
+     file picker at all — the primary action of the whole page. */
   .drop input {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* The input itself is invisible, so focus has to show on its label. */
+  .drop:has(input:focus-visible) {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-color: var(--accent);
   }
 
   .drop.dragging {
@@ -658,6 +675,21 @@
   .result.hidden,
   .hidden {
     display: none;
+  }
+
+  /* Available to assistive technology, absent from the visual layout. Used for
+     field labels the design shows only as placeholder text, which is not a
+     reliable accessible name and disappears the moment the user types. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 
   /* Semantic text colours live here, not in components, because they exist to

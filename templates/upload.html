@@ -12,6 +12,9 @@
             <span>Drag &amp; drop or click to choose a file</span>
           </label>
           <div class="text-row">
+            {#- A placeholder is not a reliable accessible name and vanishes on
+                the first keystroke, so the field carries a real label. -#}
+            <label for="text-input" class="sr-only">Text to share</label>
             <textarea id="text-input" rows="8" placeholder="Paste or type text to share"></textarea>
           </div>
           <div class="row">
