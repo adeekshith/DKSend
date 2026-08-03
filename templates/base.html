@@ -5,14 +5,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{{ title }}</title>
-    <link rel="stylesheet" href="/static/app.css?v=12">
+    <title>{{ chrome.title }}</title>
+    <link rel="stylesheet" href="/static/app.css?v={{ chrome.asset_v }}">
     {%- block head %}{% endblock %}
   </head>
   <body>
     <main class="shell">
       <header class="hero">
-        <h1>{{ title }}</h1>
+        <h1>{{ chrome.title }}</h1>
         {%- block hero %}{% endblock %}
       </header>
       {%- block content %}{% endblock %}

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -377,11 +377,17 @@ async fn shutdown_signal() {
 }
 
 
+// Asset URLs carry a content-derived version (see asset_version), so a cached
+// copy can never be stale: changed bytes mean a changed URL. Without this the
+// blanket no-store meant every page view re-fetched app.css, app.js, and the
+// 58 KB qr.js.
+const STATIC_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 fn build_router(state: AppState) -> Router {
     let static_service = get_service(ServeDir::new("static")).layer(
         SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store"),
+            header::HeaderValue::from_static(STATIC_CACHE_CONTROL),
         ),
     );
 
@@ -402,6 +408,14 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/{code}/{filename}", get(download_page_named))
         .with_state(state)
+        // Pages are never cacheable: they carry expiry countdowns and, on the
+        // delete-confirm and admin pages, a token. Inner layers have already
+        // set their own value by the time this runs, so if_not_present leaves
+        // the static assets and raw downloads alone.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        ))
 }
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
@@ -1524,7 +1538,7 @@ fn rate_limited(mut response: Response) -> Response {
 
 fn html_error(status: StatusCode, message: &str, config: &AppConfig) -> Response {
     let page = ErrorTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         message: message.to_string(),
     }
     .render_page();
@@ -1723,6 +1737,53 @@ trait RenderPage: askama::Template {
 }
 impl<T: askama::Template> RenderPage for T {}
 
+// Everything /static serves. Hashed together into one version, so a change to
+// any of them busts all three URLs — simpler than per-file versions and the
+// assets always ship as a set.
+const STATIC_ASSETS: [&str; 3] = ["app.css", "app.js", "qr.js"];
+
+// Static assets are served immutable for a year, so the version in their URL
+// must change whenever their bytes do. Deriving it from a content hash removes
+// the hand-maintained bump that let app.css sit at ?v=12 in five templates
+// while app.js had moved on to ?v=14.
+fn asset_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let mut hasher = Sha256::new();
+            for name in STATIC_ASSETS {
+                match std::fs::read(std::path::Path::new("static").join(name)) {
+                    Ok(bytes) => hasher.update(&bytes),
+                    // A missing asset is already a 404 at request time; hash
+                    // the name so startup still succeeds with a stable value.
+                    Err(_) => hasher.update(name.as_bytes()),
+                }
+            }
+            let mut hex = String::with_capacity(12);
+            for byte in hasher.finalize().iter().take(6) {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            hex
+        })
+        .as_str()
+}
+
+// Page-level chrome that every template inherits through base.html. Grouping it
+// means new head content is one struct field rather than one per page struct.
+struct PageChrome {
+    title: String,
+    asset_v: &'static str,
+}
+
+impl PageChrome {
+    fn new(config: &AppConfig) -> Self {
+        Self {
+            title: config.brand_title.clone(),
+            asset_v: asset_version(),
+        }
+    }
+}
+
 // The expiry dropdown mirrors server config: the empty value means "let the
 // server apply DEFAULT_EXPIRY", followed by standard choices that fit within
 // the configured bounds.
@@ -1761,14 +1822,14 @@ fn expiry_choices(config: &AppConfig) -> Vec<ExpiryChoice> {
 #[derive(askama::Template)]
 #[template(path = "error.html")]
 struct ErrorTemplate {
-    title: String,
+    chrome: PageChrome,
     message: String,
 }
 
 #[derive(askama::Template)]
 #[template(path = "upload.html")]
 struct UploadTemplate {
-    title: String,
+    chrome: PageChrome,
     auth_required: bool,
     auth_snippet: String,
     max_file_size: u64,
@@ -1787,7 +1848,7 @@ struct AdminRow {
 #[derive(askama::Template)]
 #[template(path = "admin.html")]
 struct AdminTemplate {
-    title: String,
+    chrome: PageChrome,
     // Echoed into each row's delete form, so it is carried once per page
     // rather than per row.
     token: String,
@@ -1799,7 +1860,7 @@ struct AdminTemplate {
 #[derive(askama::Template)]
 #[template(path = "delete.html")]
 struct DeleteTemplate {
-    title: String,
+    chrome: PageChrome,
     filename: String,
     size: String,
     code: String,
@@ -1809,7 +1870,7 @@ struct DeleteTemplate {
 #[derive(askama::Template)]
 #[template(path = "download.html")]
 struct DownloadTemplate {
-    title: String,
+    chrome: PageChrome,
     description: String,
     filename: String,
     size: String,
@@ -1824,7 +1885,7 @@ struct DownloadTemplate {
 fn render_upload_page(config: &AppConfig, base_url: &str) -> String {
     let auth_required = config.upload_token.is_some();
     UploadTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         auth_required,
         // The page only learns whether a token is needed, never the token
         // itself. The quickstart shows the proxy-safe header (see
@@ -1844,7 +1905,7 @@ fn render_upload_page(config: &AppConfig, base_url: &str) -> String {
 
 fn render_admin_login(config: &AppConfig) -> String {
     AdminTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         token: String::new(),
         uploads: None,
     }
@@ -1864,7 +1925,7 @@ fn render_admin_list(config: &AppConfig, records: &[UploadRecord], token: &str) 
         })
         .collect();
     AdminTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         token: token.to_string(),
         uploads: Some(uploads),
     }
@@ -1873,7 +1934,7 @@ fn render_admin_list(config: &AppConfig, records: &[UploadRecord], token: &str) 
 
 fn render_delete_page(record: &UploadRecord, config: &AppConfig) -> String {
     DeleteTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         filename: record.original_filename.clone(),
         size: human_size(record.size_bytes),
         code: record.code.clone(),
@@ -1901,7 +1962,7 @@ fn render_download_page(
 ) -> String {
     let encoded = urlencoding::encode(&record.original_filename);
     DownloadTemplate {
-        title: config.brand_title.clone(),
+        chrome: PageChrome::new(config),
         description: config.brand_description.clone(),
         filename: record.original_filename.clone(),
         size: human_size(record.size_bytes),
@@ -3027,6 +3088,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn static_assets_are_cacheable_forever() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/static/app.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            STATIC_CACHE_CONTROL,
+            "versioned assets must be cacheable, or every page view refetches them"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_are_never_cacheable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "pages carry expiry countdowns and tokens"
+        );
+    }
+
+    // The blanket outer layer must not clobber the routes that set their own
+    // Cache-Control, or raw downloads become uncacheable-by-accident.
+    #[tokio::test]
+    async fn raw_download_keeps_its_own_cache_control() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/victim.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, max-age=0"
+        );
+    }
+
+    // One version for all three assets, so a page can never mix a fresh
+    // stylesheet with a stale script.
+    #[tokio::test]
+    async fn every_asset_url_shares_one_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let html = render_upload_page(&state.config, "https://example.com");
+
+        let versions: std::collections::HashSet<&str> = html
+            .split("/static/")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .filter_map(|url| url.split("?v=").nth(1))
+            .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "asset URLs drifted apart: {versions:?}"
+        );
+        let version = versions.into_iter().next().unwrap();
+        assert_eq!(version, asset_version());
+        assert!(!version.is_empty(), "assets must carry a version");
+    }
+
+    #[test]
+    fn asset_version_tracks_asset_contents() {
+        // Same inputs, same value: the version is a pure function of the
+        // bytes, not a per-boot random or a hand-maintained counter.
+        assert_eq!(asset_version(), asset_version());
+        assert_eq!(asset_version().len(), 12);
+        assert!(asset_version().chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
