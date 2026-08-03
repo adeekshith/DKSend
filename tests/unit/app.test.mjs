@@ -587,6 +587,16 @@ describe('drag and drop upload', () => {
     assert.ok(dom.spanEl.textContent.endsWith('.png'));
   });
 
+  // Pasting a file while in text mode used to update selectedFiles and the
+  // hidden drop label, then submit ignored it because dataset.mode was 'text'.
+  it('pasting a file while in text mode switches back to file mode', () => {
+    dom.uploadForm.dataset.mode = 'text';
+    const file = { name: 'shot.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    assert.equal(dom.uploadForm.dataset.mode, 'file', 'a pasted file must not be ignored');
+    assert.ok(dom.spanEl.textContent.startsWith('pasted-'));
+  });
+
   it('pasted image upload uses a generated mime-derived filename', async () => {
     const file = { name: 'ignored.png', size: 100, type: 'image/png' };
     dispatchPaste(dom, [file]);

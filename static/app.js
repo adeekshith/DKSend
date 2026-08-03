@@ -224,6 +224,11 @@ if (uploadForm) {
       return;
     }
     event.preventDefault();
+    // Pasting a file while the form is in text mode used to select it and
+    // update the (hidden) drop label, then submit ignored it and shared the
+    // textarea instead — the paste silently did nothing. Switch modes so the
+    // selection is the thing that actually gets uploaded.
+    setMode('file');
     setSelectedFiles(
       Array.from(files).map((file) => ({ file, name: pastedFilename(file.type) })),
     );
