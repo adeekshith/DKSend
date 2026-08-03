@@ -55,9 +55,16 @@
     box-sizing: border-box;
   }
 
+  /* "Space Grotesk" was named here but never loaded — no @font-face, no font
+     link anywhere in the project — so it silently fell through to Avenir Next
+     on macOS, Segoe UI on Windows, and a generic sans-serif on Linux and
+     Android. Since DKSend ships as a single binary with no external services,
+     a webfont request is out; system-ui gives every platform its own native UI
+     font for zero bytes and no flash of unstyled text. */
   body {
     margin: 0;
-    font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+      Arial, sans-serif;
     background: var(--bg);
     color: var(--ink);
   }
