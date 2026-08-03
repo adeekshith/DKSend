@@ -60,8 +60,10 @@ function contrast(fg, bg) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// WCAG 1.4.3 wants 4.5:1 for normal-size text.
+// WCAG 1.4.3 wants 4.5:1 for normal-size text; 1.4.11 wants 3:1 for the
+// boundary of a UI component.
 const TEXT = 4.5;
+const UI = 3;
 
 // Each entry is [description, foreground token, background token, threshold].
 const PAIRINGS = [
@@ -74,6 +76,17 @@ const PAIRINGS = [
   ['link text on a card', '--link', '--card', TEXT],
   ['link text on the page', '--link', '--bg', TEXT],
   ['code text in a code block', '--code-ink', '--code-bg', TEXT],
+  ['field text on its own fill', '--ink', '--field-bg', TEXT],
+  ['placeholder text on a field', '--muted', '--field-bg', TEXT],
+  // Control boundaries: a field or drop zone the user cannot see is a field
+  // the user cannot find.
+  ['a field border against its fill', '--stroke-strong', '--field-bg', UI],
+  ['a field border against the card', '--stroke-strong', '--card', UI],
+  ['a secondary button border', '--stroke-strong', '--card', UI],
+  // The ring is offset onto the card, never inset over the button fill, so
+  // this is the pairing that matters.
+  ['the focus ring against a card', '--ring', '--card', UI],
+  ['the focus ring against the page', '--ring', '--bg', UI],
 ];
 
 describe('design token contrast', () => {

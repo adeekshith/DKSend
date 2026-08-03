@@ -16,7 +16,17 @@
   --accent-hover: light-dark(#1d4ed8, #1e5fd0);
   --on-accent: #ffffff;
   --link: light-dark(#1d4ed8, #8fbaff);
+  /* --stroke is for decoration only: hairline dividers between table rows and
+     result cards, where a stronger value would read as noise. Anything the
+     user can interact with uses --stroke-strong, which clears the 3:1 that
+     WCAG 1.4.11 asks of a control's boundary. --stroke alone was 1.24:1 in
+     dark and 1.44:1 in light, so fields barely registered as fields. */
   --stroke: light-dark(#d7d7d2, #2a2a27);
+  --stroke-strong: light-dark(#84847e, #727269);
+  /* A fill of its own is what actually makes a field look like a field; the
+     border only has to confirm it. */
+  --field-bg: light-dark(#f7f7f5, #222220);
+  --ring: light-dark(#2563eb, #6ea8ff);
   /* light-dark() only takes colors, so the shadow geometry is shared
      (was 12px offset in dark — an imperceptible 2px change). */
   --shadow: 0 10px 30px light-dark(rgba(28, 28, 26, 0.08), rgba(0, 0, 0, 0.4));
@@ -78,13 +88,15 @@ body {
   text-align: left;
 }
 
+/* 2px, not 1px: this is the primary affordance on the page, and a hairline
+   dashed border at the old --stroke was all but invisible in dark mode. */
 .drop {
   display: flex;
   flex-direction: column;
   gap: 10px;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--stroke);
+  border: 2px dashed var(--stroke-strong);
   border-radius: 20px;
   padding: 32px;
   cursor: pointer;
@@ -121,7 +133,7 @@ body {
   gap: 4px;
   margin-bottom: 16px;
   padding: 4px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--stroke-strong);
   border-radius: 12px;
   width: fit-content;
 }
@@ -179,15 +191,25 @@ label {
   color: var(--muted);
 }
 
+/* textarea belongs here too: left out, it kept the UA's own border, radius,
+   and padding and visibly mismatched every other field on the form. */
 input,
-select {
+select,
+textarea {
   padding: 12px 14px;
   border-radius: 12px;
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--stroke-strong);
   font-size: 15px;
   font-family: inherit;
-  background: transparent;
+  background: var(--field-bg);
   color: var(--ink);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 button,
@@ -256,7 +278,7 @@ button:hover,
   justify-content: center;
   cursor: pointer;
   background: var(--card);
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--stroke-strong);
   color: var(--ink);
 }
 
@@ -361,7 +383,7 @@ button:hover,
 
 .actions button {
   background: var(--card);
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--stroke-strong);
   color: var(--ink);
 }
 
@@ -519,7 +541,7 @@ button:hover,
   padding: 6px 12px;
   font-size: 13px;
   background: var(--card);
-  border: 1px solid var(--stroke);
+  border: 1px solid var(--stroke-strong);
   color: var(--ink);
 }
 
