@@ -28,6 +28,20 @@ const copyText = async (text) => {
   }
 };
 
+// Every value interpolated into an innerHTML template goes through this. The
+// filename comes from the uploader's own ?name= parameter and is NOT escaped
+// server-side (unlike the download page, which renders through a template that
+// escapes automatically), so `?name=<img src=x onerror=...>` used to execute.
+// Only the uploader can reach it, but it also meant any filename containing
+// &, <, or " rendered wrong.
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 const setButtonState = (button, ok) => {
   const original = button.dataset.label || button.textContent;
   button.dataset.label = original;
@@ -280,7 +294,7 @@ if (uploadForm) {
     const pct = total ? Math.floor((loaded / total) * 100) : 0;
     return `
       <div class="upload-progress" role="status" aria-live="polite">
-        <p>Uploading <strong>${label}</strong>…</p>
+        <p>Uploading <strong>${escapeHtml(label)}</strong>…</p>
         <progress max="${total}" value="${loaded}"></progress>
         <span class="progress-text">${pct}% · ${humanSize(loaded)} / ${humanSize(total)}</span>
       </div>
@@ -289,31 +303,31 @@ if (uploadForm) {
 
   const renderResultCard = (data) => {
     // The server-side expiry clamp is an adjustment, not a failure.
-    const warning = data.warning ? `<p class="notice-warn">${data.warning}</p>` : '';
+    const warning = data.warning ? `<p class="notice-warn">${escapeHtml(data.warning)}</p>` : '';
     const hashRow = data.sha256
-      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" class="btn btn-secondary" data-copy="${data.sha256}">Copy</button></div>`
+      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${escapeHtml(data.sha256)}"><button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.sha256)}">Copy</button></div>`
       : '';
     const deleteRow = data.delete_url
-      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" class="btn btn-secondary" data-copy="${data.delete_url}">Copy</button></div>`
+      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${escapeHtml(data.delete_url)}"><button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.delete_url)}">Copy</button></div>`
       : '';
     return `
       <div class="file-card">
-        <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
+        <p><strong>${escapeHtml(data.filename)}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
         ${warning}
         <div class="result-actions">
-          <a class="btn btn-secondary" href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
+          <a class="btn btn-secondary" href="${escapeHtml(data.download_page_url)}" target="_blank" rel="noopener">Open download page</a>
         </div>
         <div class="qr-block" role="img" aria-label="QR code for this share link">${qrSvgTag(data.download_page_url)}</div>
         <div class="link-list">
           <div class="link-row">
             <span class="row-label">Page</span>
-            <input type="text" readonly value="${data.download_page_url}">
-            <button type="button" class="btn btn-secondary" data-copy="${data.download_page_url}">Copy</button>
+            <input type="text" readonly value="${escapeHtml(data.download_page_url)}">
+            <button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.download_page_url)}">Copy</button>
           </div>
           <div class="link-row">
             <span class="row-label">Raw</span>
-            <input type="text" readonly value="${data.raw_download_url}">
-            <button type="button" class="btn btn-secondary" data-copy="${data.raw_download_url}">Copy</button>
+            <input type="text" readonly value="${escapeHtml(data.raw_download_url)}">
+            <button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.raw_download_url)}">Copy</button>
           </div>
           ${hashRow}
           ${deleteRow}
@@ -324,8 +338,8 @@ if (uploadForm) {
 
   const renderErrorCard = (name, message) => `
     <div class="file-card file-card-error">
-      <p><strong>${name}</strong></p>
-      <p class="notice-danger">${message}</p>
+      <p><strong>${escapeHtml(name)}</strong></p>
+      <p class="notice-danger">${escapeHtml(message)}</p>
     </div>
   `;
 

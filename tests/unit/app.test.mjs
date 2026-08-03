@@ -813,3 +813,57 @@ describe('upload.html template', () => {
     assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
   });
 });
+
+describe('interpolated values are escaped', () => {
+  const HOSTILE = '<img src=x onerror=alert(1)>.txt';
+
+  it('a hostile filename is escaped in the result card', async () => {
+    const dom = makeDom();
+    loadApp(dom, {
+      responses: [{ status: 200, json: { ...SUCCESS_JSON, filename: HOSTILE } }],
+    });
+    dom.fileInput.files = [{ name: HOSTILE, size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(!html.includes('<img src=x'), `raw markup must not reach the DOM: ${html}`);
+    assert.ok(html.includes('&lt;img src=x'), 'the name should still be shown, escaped');
+  });
+
+  it('a hostile filename is escaped in an error card', async () => {
+    const dom = makeDom();
+    loadApp(dom, {
+      responses: [{ status: 500, json: { success: false, error: { message: '<b>boom</b>' } } }],
+    });
+    dom.fileInput.files = [{ name: HOSTILE, size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(!html.includes('<img src=x'), 'filename must be escaped');
+    assert.ok(!html.includes('<b>boom</b>'), 'the server message must be escaped too');
+    assert.ok(html.includes('&lt;b&gt;boom'), 'and still be readable');
+  });
+
+  it('a quote in a filename cannot break out of an attribute', async () => {
+    const dom = makeDom();
+    const nasty = 'a" onmouseover="alert(1)';
+    loadApp(dom, {
+      responses: [
+        { status: 200, json: { ...SUCCESS_JSON, download_page_url: `http://x/${nasty}` } },
+      ],
+    });
+    dom.fileInput.files = [{ name: 'q.txt', size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.ok(
+      !dom.resultDiv.innerHTML.includes('onmouseover="'),
+      'a bare quote must not terminate the attribute',
+    );
+  });
+});
