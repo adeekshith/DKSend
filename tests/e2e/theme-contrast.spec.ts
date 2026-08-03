@@ -74,7 +74,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
 
     test('the selected mode tab is readable', async ({ page }) => {
       await page.goto('/');
-      const tab = '.mode-tab[aria-selected="true"]';
+      const tab = '.mode-tab[aria-pressed="true"]';
       const fg = await computed(page, tab, 'color');
       const bg = await computed(page, tab, 'background-color');
       const ratio = contrast(fg, bg);

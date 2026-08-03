@@ -348,7 +348,7 @@
     font-weight: 600;
   }
 
-  .mode-tab[aria-selected="true"] {
+  .mode-tab[aria-pressed="true"] {
     background: var(--accent);
     color: var(--on-accent);
   }
@@ -358,7 +358,7 @@
     color: var(--ink);
   }
 
-  .mode-tab[aria-selected="true"]:hover {
+  .mode-tab[aria-pressed="true"]:hover {
     background: var(--accent-hover);
     color: var(--on-accent);
   }

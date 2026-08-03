@@ -3,9 +3,12 @@
 {% block content %}
       <section class="card">
         <form id="upload-form" data-auth-required="{{ auth_required }}" data-max-file-size="{{ max_file_size }}" data-mode="file">
-          <div class="mode-toggle" role="tablist">
-            <button type="button" class="mode-tab" data-mode-set="file" aria-selected="true">File</button>
-            <button type="button" class="mode-tab" data-mode-set="text" aria-selected="false">Text</button>
+          {#- A pair of toggle buttons, not a tablist: aria-selected is not valid
+              on a role-less button, there are no tabpanels for tabs to control,
+              and a real tablist would owe the user arrow-key navigation. -#}
+          <div class="mode-toggle" role="group" aria-label="What to share">
+            <button type="button" class="mode-tab" data-mode-set="file" aria-pressed="true">File</button>
+            <button type="button" class="mode-tab" data-mode-set="text" aria-pressed="false">Text</button>
           </div>
           <label class="drop" id="drop-zone">
             <input type="file" id="file" multiple>

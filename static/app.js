@@ -96,7 +96,7 @@ if (uploadForm) {
   const setMode = (mode) => {
     uploadForm.dataset.mode = mode;
     for (const tab of modeTabs) {
-      tab.setAttribute('aria-selected', tab.getAttribute('data-mode-set') === mode ? 'true' : 'false');
+      tab.setAttribute('aria-pressed', tab.getAttribute('data-mode-set') === mode ? 'true' : 'false');
     }
   };
   for (const tab of modeTabs) {
