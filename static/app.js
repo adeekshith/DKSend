@@ -419,15 +419,25 @@ if (uploadForm) {
       if (result) {
         result.innerHTML = renderProgressHtml(label, 0, file.size) + cardsHtml;
       }
+      // Rewriting result.innerHTML re-parses every already-finished card,
+      // rebuilding their QR <svg>s and inputs and dropping any selection the
+      // user had in them. xhr fires progress far more often than the display
+      // changes, so only redraw when the percentage the user sees actually
+      // moves: for a large upload that is at most 101 redraws instead of one
+      // per network chunk.
+      let lastPct = -1;
       try {
         const data = await uploadFile(file, {
           name,
           expires: expirySelect?.value || '',
           token,
           onProgress: (loaded, total) => {
-            if (result) {
-              result.innerHTML = renderProgressHtml(label, loaded, total) + cardsHtml;
+            const pct = total ? Math.floor((loaded / total) * 100) : 0;
+            if (!result || pct === lastPct) {
+              return;
             }
+            lastPct = pct;
+            result.innerHTML = renderProgressHtml(label, loaded, total) + cardsHtml;
           },
         });
         successCount += 1;

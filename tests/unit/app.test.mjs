@@ -464,6 +464,44 @@ describe('drag and drop upload', () => {
     ctx2.instances[0].respond();
   });
 
+  // Guards the redraw budget: xhr fires progress per network chunk, and each
+  // redraw re-parses every finished card in the panel.
+  it('redraws only when the displayed percentage changes', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+
+    // Count innerHTML writes on the result panel.
+    let writes = 0;
+    let stored = '';
+    Object.defineProperty(dom2.resultDiv, 'innerHTML', {
+      configurable: true,
+      get: () => stored,
+      set: (value) => {
+        stored = value;
+        writes += 1;
+      },
+    });
+
+    const file = { name: 'chunky.bin', size: 10000 };
+    dom2.dropZone.dispatchEvent(makeEvent('drop', { dataTransfer: { files: [file] } }));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const before = writes;
+    // 40 events that all land on 1% — the user sees no change.
+    for (let loaded = 100; loaded < 140; loaded += 1) {
+      ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded, total: 10000 });
+    }
+    assert.equal(writes - before, 1, `expected one redraw for one percentage, got ${writes - before}`);
+
+    // Crossing into 2% must still redraw.
+    ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded: 200, total: 10000 });
+    assert.equal(writes - before, 2);
+    assert.ok(dom2.resultDiv.innerHTML.includes('2%'), 'the new percentage should be shown');
+
+    ctx2.instances[0].respond();
+  });
+
   it('shows the server error message when the response is not success', async () => {
     const dom2 = makeDom();
     loadApp(dom2, {
