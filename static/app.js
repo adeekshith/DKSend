@@ -279,7 +279,7 @@ if (uploadForm) {
   const renderProgressHtml = (label, loaded, total) => {
     const pct = total ? Math.floor((loaded / total) * 100) : 0;
     return `
-      <div class="upload-progress">
+      <div class="upload-progress" role="status" aria-live="polite">
         <p>Uploading <strong>${label}</strong>…</p>
         <progress max="${total}" value="${loaded}"></progress>
         <span class="progress-text">${pct}% · ${humanSize(loaded)} / ${humanSize(total)}</span>
@@ -303,7 +303,7 @@ if (uploadForm) {
         <div class="result-actions">
           <a class="btn btn-secondary" href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
         </div>
-        <div class="qr-block">${qrSvgTag(data.download_page_url)}</div>
+        <div class="qr-block" role="img" aria-label="QR code for this share link">${qrSvgTag(data.download_page_url)}</div>
         <div class="link-list">
           <div class="link-row">
             <span class="row-label">Page</span>
