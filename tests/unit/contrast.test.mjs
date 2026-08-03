@@ -87,6 +87,11 @@ const PAIRINGS = [
   // this is the pairing that matters.
   ['the focus ring against a card', '--ring', '--card', UI],
   ['the focus ring against the page', '--ring', '--bg', UI],
+  // Destructive and cautionary states.
+  ['a destructive button label', '--on-accent', '--danger', TEXT],
+  ['a destructive button label on hover', '--on-accent', '--danger-hover', TEXT],
+  ['error text on a card', '--danger-ink', '--card', TEXT],
+  ['caution text on a card', '--warn-ink', '--card', TEXT],
 ];
 
 describe('design token contrast', () => {

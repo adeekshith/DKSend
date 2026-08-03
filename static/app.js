@@ -288,7 +288,8 @@ if (uploadForm) {
   };
 
   const renderResultCard = (data) => {
-    const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
+    // The server-side expiry clamp is an adjustment, not a failure.
+    const warning = data.warning ? `<p class="notice-warn">${data.warning}</p>` : '';
     const hashRow = data.sha256
       ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" class="btn btn-secondary" data-copy="${data.sha256}">Copy</button></div>`
       : '';
@@ -324,7 +325,7 @@ if (uploadForm) {
   const renderErrorCard = (name, message) => `
     <div class="file-card file-card-error">
       <p><strong>${name}</strong></p>
-      <p class="warn">${message}</p>
+      <p class="notice-danger">${message}</p>
     </div>
   `;
 

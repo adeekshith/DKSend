@@ -80,15 +80,17 @@ test('buttons in a row share one baseline', async ({ page }) => {
   await page.locator('button[type="submit"]').click();
   await expect(page.locator('[data-result] h3')).toHaveText('Uploaded');
 
-  const tops = await page.evaluate(() =>
+  // The row centres its children, and the SHA-256 row deliberately uses a
+  // smaller font, so compare centres rather than top edges.
+  const deltas = await page.evaluate(() =>
     Array.from(document.querySelectorAll('.link-row')).map((row) => {
       const input = row.querySelector('input')!.getBoundingClientRect();
       const button = row.querySelector('button')!.getBoundingClientRect();
-      return Math.abs(input.top - button.top);
+      return Math.abs((input.top + input.bottom) / 2 - (button.top + button.bottom) / 2);
     }),
   );
-  expect(tops.length).toBeGreaterThan(0);
-  for (const delta of tops) {
-    expect(delta, 'input and its copy button must align').toBeLessThanOrEqual(1);
+  expect(deltas.length).toBeGreaterThan(0);
+  for (const delta of deltas) {
+    expect(delta, 'input and its copy button must share a centreline').toBeLessThanOrEqual(1);
   }
 });

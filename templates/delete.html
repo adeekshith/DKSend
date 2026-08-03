@@ -5,12 +5,12 @@
         <div class="file-meta">
           <h2>{{ filename }}</h2>
           <p>{{ size }}</p>
-          <p class="expiry">Deleting this file cannot be undone.</p>
+          <p class="notice-danger">Deleting this file cannot be undone.</p>
         </div>
         <form method="post" action="/delete/{{ code }}">
           <input type="hidden" name="token" value="{{ token }}">
           <div class="result-actions">
-            <button type="submit" class="btn btn-primary">Delete file</button>
+            <button type="submit" class="btn btn-danger">Delete file</button>
             <a class="btn btn-secondary" href="/{{ code }}">Cancel</a>
           </div>
         </form>

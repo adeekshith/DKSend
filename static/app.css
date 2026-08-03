@@ -34,6 +34,14 @@
        border only has to confirm it. */
     --field-bg: light-dark(#f7f7f5, #222220);
     --ring: light-dark(#2563eb, #6ea8ff);
+    /* Destructive and cautionary states had no colour of their own, so the
+       irreversible Delete button was the same friendly blue as Upload and
+       upload failures were reported in accent blue — reading as information
+       rather than as errors. */
+    --danger: light-dark(#c02626, #d13c3c);
+    --danger-hover: light-dark(#a11d1d, #b82f2f);
+    --danger-ink: light-dark(#b3261e, #ff9b9b);
+    --warn-ink: light-dark(#8a5a00, #ffca6b);
     /* light-dark() only takes colors, so the shadow geometry is shared
        (was 12px offset in dark — an imperceptible 2px change). */
     --shadow: 0 10px 30px light-dark(rgba(28, 28, 26, 0.08), rgba(0, 0, 0, 0.4));
@@ -216,6 +224,35 @@
     background: color-mix(in srgb, var(--card), var(--ink) 6%);
     border-color: var(--stroke-strong);
     color: var(--ink);
+  }
+
+  /* Filled: for the one place the user has already been asked to confirm, so
+     the destructive action should be the visually dominant one. */
+  .btn-danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: var(--on-accent);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: var(--danger-hover);
+    border-color: var(--danger-hover);
+    color: var(--on-accent);
+  }
+
+  /* Outlined: for destructive actions that sit in a list, where a column of
+     filled red blocks would drown out the rest of the table while still
+     needing to read as destructive. */
+  .btn-danger-outline {
+    background: var(--card);
+    border-color: var(--stroke-strong);
+    color: var(--danger-ink);
+  }
+
+  .btn-danger-outline:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--card), var(--danger) 8%);
+    border-color: var(--danger);
+    color: var(--danger-ink);
   }
 
   .btn-sm {
@@ -431,11 +468,6 @@
     color: var(--muted);
   }
 
-  .expiry {
-    color: color-mix(in srgb, var(--link), var(--ink) 20%);
-    font-weight: 600;
-  }
-
   .code {
     margin-top: 20px;
     background: var(--code-bg);
@@ -480,11 +512,6 @@
     word-break: break-word;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 13px;
-  }
-
-  .warn {
-    color: color-mix(in srgb, var(--accent), var(--ink) 20%);
-    font-weight: 600;
   }
 
   .file-card {
@@ -624,5 +651,30 @@
   .result.hidden,
   .hidden {
     display: none;
+  }
+
+  /* Semantic text colours live here, not in components, because they exist to
+     override whatever container styling a message happens to sit inside. As
+     plain single-class selectors in the components layer they lost to
+     `.file-meta p` (0,1,1 beats 0,1,0) — which is why .expiry's colour never
+     actually rendered on the download page, and why the delete-page warning
+     came out muted grey. Layer order settles it without a specificity hack. */
+  .expiry {
+    color: color-mix(in srgb, var(--link), var(--ink) 20%);
+    font-weight: 600;
+  }
+
+  /* Split by severity: these used to share one accent-blue .warn, so a failed
+     upload looked like a tip. --danger-ink is for something that went wrong;
+     --warn-ink is for something that was adjusted, such as an expiry clamped
+     to the server's maximum. */
+  .notice-danger {
+    color: var(--danger-ink);
+    font-weight: 600;
+  }
+
+  .notice-warn {
+    color: var(--warn-ink);
+    font-weight: 600;
   }
 }
