@@ -13,7 +13,48 @@
         <p>Admin</p>
       </header>
       <section class="card admin-card">
-        {{ admin_body|safe }}
+        {%- if let Some(uploads) = uploads %}
+        {%- if uploads.is_empty() %}
+        <p class="admin-empty">No active uploads.</p>
+        {%- else %}
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Filename</th>
+              <th>Size</th>
+              <th>Uploaded (UTC)</th>
+              <th>Expires in</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {%- for row in uploads %}
+            <tr>
+              <td><a href="/{{ row.code }}">{{ row.code }}</a></td>
+              <td class="file-name">{{ row.filename }}</td>
+              <td>{{ row.size }}</td>
+              <td>{{ row.created }}</td>
+              <td>{{ row.expires }}</td>
+              <td>
+                <form method="post" action="/admin/delete/{{ row.code }}">
+                  <input type="hidden" name="token" value="{{ token }}">
+                  <button type="submit">Delete</button>
+                </form>
+              </td>
+            </tr>
+            {%- endfor %}
+          </tbody>
+        </table>
+        {%- endif %}
+        {%- else %}
+        <form method="post" action="/admin" class="admin-login">
+          <label>Admin token (UPLOAD_TOKEN)
+            <input type="password" name="token" autocomplete="off" required>
+          </label>
+          <button type="submit">View uploads</button>
+        </form>
+        {%- endif %}
       </section>
     </main>
   </body>

@@ -1262,11 +1262,7 @@ async fn admin_page(State(state): State<AppState>) -> Response {
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    Html(render_admin_page(
-        &state.config,
-        render_admin_login(),
-    ))
-    .into_response()
+    Html(render_admin_login(&state.config)).into_response()
 }
 
 async fn admin_list_action(
@@ -1382,9 +1378,8 @@ async fn admin_delete_action(
 async fn admin_table_response(state: &AppState, token: &str) -> Response {
     match fetch_active_uploads(&state.pool).await {
         Ok(records) => {
-            let body = render_admin_list(&records, token);
             let mut response =
-                Html(render_admin_page(&state.config, body)).into_response();
+                Html(render_admin_list(&state.config, &records, token)).into_response();
             response.headers_mut().insert(
                 header::CACHE_CONTROL,
                 header::HeaderValue::from_static("no-store"),
@@ -1717,15 +1712,6 @@ fn format_duration(duration: ChronoDuration) -> String {
     format!("{} days", days)
 }
 
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 // Askama renders into a String and only fails on a formatter error, which for
 // a String sink cannot happen. Panicking here keeps every call site free of an
 // error path it could not act on anyway.
@@ -1790,11 +1776,24 @@ struct UploadTemplate {
     expiry_choices: Vec<ExpiryChoice>,
 }
 
+struct AdminRow {
+    code: String,
+    filename: String,
+    size: String,
+    created: String,
+    expires: String,
+}
+
 #[derive(askama::Template)]
 #[template(path = "admin.html")]
 struct AdminTemplate {
     title: String,
-    admin_body: String,
+    // Echoed into each row's delete form, so it is carried once per page
+    // rather than per row.
+    token: String,
+    // None renders the login form; Some renders the upload table, which may
+    // legitimately be empty.
+    uploads: Option<Vec<AdminRow>>,
 }
 
 #[derive(askama::Template)]
@@ -1843,44 +1842,33 @@ fn render_upload_page(config: &AppConfig, base_url: &str) -> String {
     .render_page()
 }
 
-fn render_admin_page(config: &AppConfig, body: String) -> String {
+fn render_admin_login(config: &AppConfig) -> String {
     AdminTemplate {
         title: config.brand_title.clone(),
-        admin_body: body,
+        token: String::new(),
+        uploads: None,
     }
     .render_page()
 }
 
-fn render_admin_login() -> String {
-    r#"<form method="post" action="/admin" class="admin-login">
-      <label>Admin token (UPLOAD_TOKEN)
-        <input type="password" name="token" autocomplete="off" required>
-      </label>
-      <button type="submit">View uploads</button>
-    </form>"#
-        .to_string()
-}
-
-fn render_admin_list(records: &[UploadRecord], token: &str) -> String {
-    if records.is_empty() {
-        return r#"<p class="admin-empty">No active uploads.</p>"#.to_string();
-    }
+fn render_admin_list(config: &AppConfig, records: &[UploadRecord], token: &str) -> String {
     let now = Utc::now();
-    let escaped_token = escape_html(token);
-    let mut rows = String::new();
-    for record in records {
-        let code = &record.code; // generated charset, safe to embed
-        let filename = escape_html(&record.original_filename);
-        let size = human_size(record.size_bytes);
-        let created = record.created_at.format("%Y-%m-%d %H:%M").to_string();
-        let expires = format_duration(record.expires_at - now);
-        rows.push_str(&format!(
-            r#"<tr><td><a href="/{code}">{code}</a></td><td class="file-name">{filename}</td><td>{size}</td><td>{created}</td><td>{expires}</td><td><form method="post" action="/admin/delete/{code}"><input type="hidden" name="token" value="{escaped_token}"><button type="submit">Delete</button></form></td></tr>"#
-        ));
+    let uploads = records
+        .iter()
+        .map(|record| AdminRow {
+            code: record.code.clone(),
+            filename: record.original_filename.clone(),
+            size: human_size(record.size_bytes),
+            created: record.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            expires: format_duration(record.expires_at - now),
+        })
+        .collect();
+    AdminTemplate {
+        title: config.brand_title.clone(),
+        token: token.to_string(),
+        uploads: Some(uploads),
     }
-    format!(
-        r#"<table class="admin-table"><thead><tr><th>Code</th><th>Filename</th><th>Size</th><th>Uploaded (UTC)</th><th>Expires in</th><th></th></tr></thead><tbody>{rows}</tbody></table>"#
-    )
+    .render_page()
 }
 
 fn render_delete_page(record: &UploadRecord, config: &AppConfig) -> String {
@@ -3097,8 +3085,44 @@ mod tests {
             .unwrap();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(html.contains("&lt;img src=x&gt;.txt"));
-        assert!(!html.contains("<img src=x>"));
+        // The escaper emits numeric entities, so assert the security property
+        // rather than a particular entity spelling.
+        assert!(!html.contains("<img src=x>"), "raw markup must never appear");
+        assert!(
+            html.contains("img src=x") && html.contains(".txt"),
+            "the filename text should still be visible: {html}"
+        );
+    }
+
+    // The admin token used to be interpolated per row; it now lives once on
+    // the template and is echoed into each row's form by the loop.
+    #[tokio::test]
+    async fn admin_list_gives_every_row_a_token_bearing_delete_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = None;
+        let (code_a, _) = upload_for_delete(&state).await;
+        let (code_b, _) = upload_for_delete(&state).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "s3cret"))
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+
+        for code in [&code_a, &code_b] {
+            assert!(
+                html.contains(&format!(r#"action="/admin/delete/{code}""#)),
+                "row {code} needs its own delete form"
+            );
+        }
+        assert_eq!(
+            html.matches(r#"name="token" value="s3cret""#).count(),
+            2,
+            "each row's form must carry the admin token"
+        );
     }
 
     #[tokio::test]
