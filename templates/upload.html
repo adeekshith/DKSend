@@ -47,9 +47,12 @@
       </section>
       <section class="notes">
         <div>
-          <h2>CLI quickstart</h2>
+          <div class="content-head">
+            <h2>CLI quickstart</h2>
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-from="#cli-quickstart">Copy</button>
+          </div>
           {#- site_url is the actual request origin, resolved server-side -#}
-          <pre>curl{{ auth_snippet }} --upload-file ./hello.txt {{ site_url }}</pre>
+          <pre id="cli-quickstart">curl{{ auth_snippet }} --upload-file ./hello.txt {{ site_url }}</pre>
         </div>
       </section>
 {% endblock %}

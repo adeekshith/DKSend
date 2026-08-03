@@ -73,6 +73,15 @@ for (const el of qrHosts) {
   el.innerHTML = qrSvgTag(el.getAttribute('data-qr'));
 }
 
+// Clicking a readonly share link selects the whole value, so keyboard copy
+// works without dragging across a long URL.
+document.addEventListener('focusin', (event) => {
+  const field = event.target;
+  if (field?.matches?.('input[readonly]')) {
+    field.select?.();
+  }
+});
+
 document.addEventListener('click', async (event) => {
   // data-copy carries the text directly; data-copy-from="#id" copies that
   // element's textContent (used for the inline file contents, so a large
@@ -437,6 +446,7 @@ if (uploadForm) {
     }
     if (successCount > 0) {
       uploadForm.classList.add('hidden');
+      result?.scrollIntoView?.({ block: 'nearest' });
     }
     if (submitButton) {
       submitButton.disabled = false;

@@ -50,3 +50,7 @@
         {%- endif %}
       </section>
 {% endblock %}
+
+{% block scripts %}
+    <script src="/static/app.js?v={{ chrome.asset_v }}" defer></script>
+{% endblock %}
