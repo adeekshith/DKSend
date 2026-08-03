@@ -30,7 +30,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 struct AppState {
     pool: Pool<Sqlite>,
     config: AppConfig,
-    templates: Templates,
     upload_limiter: Option<RateLimiter>,
     lookup_limiter: Option<RateLimiter>,
 }
@@ -193,14 +192,6 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
 }
 
 #[derive(Clone)]
-struct Templates {
-    upload: String,
-    download: String,
-    error: String,
-    delete: String,
-    admin: String,
-}
-
 #[derive(Debug, Serialize)]
 struct UploadResponse {
     success: bool,
@@ -286,7 +277,6 @@ async fn main() {
 
 async fn run() -> Result<(), anyhow::Error> {
     let config = load_config()?;
-    let templates = load_templates().await?;
     let db_path = config.data_dir.join("uploads.db");
     eprintln!(
         "DKSend startup: data_dir={}, db_path={}, max_file_size={}, default_expiry_secs={}, max_expiry_secs={}, brand_title=\"{}\"",
@@ -323,7 +313,6 @@ async fn run() -> Result<(), anyhow::Error> {
         upload_limiter: RateLimiter::new(config.upload_rate_per_min),
         lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
         config,
-        templates,
     };
 
     let app = build_router(state.clone());
@@ -413,21 +402,6 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/{code}/{filename}", get(download_page_named))
         .with_state(state)
-}
-
-async fn load_templates() -> Result<Templates, anyhow::Error> {
-    let upload = fs::read_to_string("static/upload.html").await?;
-    let download = fs::read_to_string("static/download.html").await?;
-    let error = fs::read_to_string("static/error.html").await?;
-    let delete = fs::read_to_string("static/delete.html").await?;
-    let admin = fs::read_to_string("static/admin.html").await?;
-    Ok(Templates {
-        upload,
-        download,
-        error,
-        delete,
-        admin,
-    })
 }
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
@@ -865,7 +839,7 @@ async fn handle_upload(
 async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
     // Pass base_url so the CLI quickstart snippet shows the actual server URL
     let base_url = resolve_base_url(&state.config, &headers);
-    Html(render_upload_page(&state.templates, &state.config, &base_url))
+    Html(render_upload_page(&state.config, &base_url))
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {
@@ -918,7 +892,6 @@ async fn download_page(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -935,7 +908,6 @@ async fn download_page(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -943,7 +915,6 @@ async fn download_page(
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -958,7 +929,6 @@ async fn download_page(
         return html_error(
             StatusCode::GONE,
             "This file does not exist or is no longer available.",
-            &state.templates,
             &state.config,
         );
     }
@@ -990,7 +960,6 @@ async fn download_page(
         &record,
         &base_url,
         inline,
-        &state.templates,
         &state.config,
     ))
     .into_response()
@@ -1203,7 +1172,6 @@ async fn delete_confirm_page(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist or was already deleted.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -1211,7 +1179,6 @@ async fn delete_confirm_page(
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -1224,11 +1191,10 @@ async fn delete_confirm_page(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid delete link.",
-            &state.templates,
             &state.config,
         );
     }
-    Html(render_delete_page(&record, &state.templates, &state.config)).into_response()
+    Html(render_delete_page(&record, &state.config)).into_response()
 }
 
 async fn delete_form_action(
@@ -1250,25 +1216,21 @@ async fn delete_form_action(
         Ok(DeleteOutcome::Deleted) => html_error(
             StatusCode::OK,
             "File deleted.",
-            &state.templates,
             &state.config,
         ),
         Ok(DeleteOutcome::NotFound) => html_error(
             StatusCode::NOT_FOUND,
             "This file does not exist or was already deleted.",
-            &state.templates,
             &state.config,
         ),
         Ok(DeleteOutcome::Forbidden) => html_error(
             StatusCode::FORBIDDEN,
             "Invalid delete token.",
-            &state.templates,
             &state.config,
         ),
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not delete the file.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1292,7 +1254,6 @@ fn admin_not_found(state: &AppState) -> Response {
     html_error(
         StatusCode::NOT_FOUND,
         "This page does not exist.",
-        &state.templates,
         &state.config,
     )
 }
@@ -1302,7 +1263,6 @@ async fn admin_page(State(state): State<AppState>) -> Response {
         return admin_not_found(&state);
     }
     Html(render_admin_page(
-        &state.templates,
         &state.config,
         render_admin_login(),
     ))
@@ -1325,7 +1285,6 @@ async fn admin_list_action(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -1335,7 +1294,6 @@ async fn admin_list_action(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid admin token.",
-            &state.templates,
             &state.config,
         );
     }
@@ -1364,7 +1322,6 @@ async fn admin_delete_action(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -1378,7 +1335,6 @@ async fn admin_delete_action(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid admin token.",
-            &state.templates,
             &state.config,
         );
     }
@@ -1391,7 +1347,6 @@ async fn admin_delete_action(
                 return html_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Could not delete the file.",
-                    &state.templates,
                     &state.config,
                 );
             }
@@ -1411,14 +1366,12 @@ async fn admin_delete_action(
             html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist or was already deleted.",
-                &state.templates,
                 &state.config,
             )
         }
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not delete the file.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1431,7 +1384,7 @@ async fn admin_table_response(state: &AppState, token: &str) -> Response {
         Ok(records) => {
             let body = render_admin_list(&records, token);
             let mut response =
-                Html(render_admin_page(&state.templates, &state.config, body)).into_response();
+                Html(render_admin_page(&state.config, body)).into_response();
             response.headers_mut().insert(
                 header::CACHE_CONTROL,
                 header::HeaderValue::from_static("no-store"),
@@ -1441,7 +1394,6 @@ async fn admin_table_response(state: &AppState, token: &str) -> Response {
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not load uploads.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1575,15 +1527,12 @@ fn rate_limited(mut response: Response) -> Response {
     response
 }
 
-fn html_error(status: StatusCode, message: &str, templates: &Templates, config: &AppConfig) -> Response {
-    let title = escape_html(&config.brand_title);
-    let page = render_template(
-        &templates.error,
-        &[
-            ("{{title}}", title.clone()),
-            ("{{message}}", escape_html(message)),
-        ],
-    );
+fn html_error(status: StatusCode, message: &str, config: &AppConfig) -> Response {
+    let page = ErrorTemplate {
+        title: config.brand_title.clone(),
+        message: message.to_string(),
+    }
+    .render_page();
     (status, Html(page)).into_response()
 }
 
@@ -1777,28 +1726,36 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
-    let mut output = template.to_string();
-    for (key, value) in replacements {
-        output = output.replace(key, value);
+// Askama renders into a String and only fails on a formatter error, which for
+// a String sink cannot happen. Panicking here keeps every call site free of an
+// error path it could not act on anyway.
+trait RenderPage: askama::Template {
+    fn render_page(&self) -> String {
+        self.render()
+            .expect("compiled template must render into a String")
     }
-    output
 }
+impl<T: askama::Template> RenderPage for T {}
 
 // The expiry dropdown mirrors server config: the empty value means "let the
 // server apply DEFAULT_EXPIRY", followed by standard choices that fit within
 // the configured bounds.
-fn expiry_options_html(config: &AppConfig) -> String {
+struct ExpiryChoice {
+    value: String,
+    label: String,
+}
+
+fn expiry_choices(config: &AppConfig) -> Vec<ExpiryChoice> {
     let candidates = [
         Duration::from_secs(60 * 30),
         Duration::from_secs(60 * 60),
         Duration::from_secs(60 * 60 * 24),
         Duration::from_secs(60 * 60 * 24 * 7),
     ];
-    let mut html = format!(
-        r#"<option value="">{} (default)</option>"#,
-        duration_short(config.default_expiry)
-    );
+    let mut choices = vec![ExpiryChoice {
+        value: String::new(),
+        label: format!("{} (default)", duration_short(config.default_expiry)),
+    }];
     for candidate in candidates {
         if candidate < config.min_expiry
             || candidate > config.max_expiry
@@ -1807,45 +1764,91 @@ fn expiry_options_html(config: &AppConfig) -> String {
             continue;
         }
         let label = duration_short(candidate);
-        html.push_str(&format!(r#"<option value="{label}">{label}</option>"#));
+        choices.push(ExpiryChoice {
+            value: label.clone(),
+            label,
+        });
     }
-    html
+    choices
 }
 
-fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
-    let title = escape_html(&config.brand_title);
-    let description = escape_html(&config.brand_description);
+#[derive(askama::Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    title: String,
+    message: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "upload.html")]
+struct UploadTemplate {
+    title: String,
+    auth_required: bool,
+    auth_snippet: String,
+    max_file_size: u64,
+    site_url: String,
+    expiry_choices: Vec<ExpiryChoice>,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin.html")]
+struct AdminTemplate {
+    title: String,
+    admin_body: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "delete.html")]
+struct DeleteTemplate {
+    title: String,
+    filename: String,
+    size: String,
+    code: String,
+    token: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "download.html")]
+struct DownloadTemplate {
+    title: String,
+    description: String,
+    filename: String,
+    size: String,
+    created_at: String,
+    expires_in: String,
+    download_url: String,
+    download_page_url: String,
+    sha256_hex: String,
+    inline_text: Option<String>,
+}
+
+fn render_upload_page(config: &AppConfig, base_url: &str) -> String {
     let auth_required = config.upload_token.is_some();
-    // The page only learns whether a token is needed, never the token itself.
-    // The quickstart shows the proxy-safe header (see upload_authorized).
-    let auth_snippet = if auth_required {
-        escape_html(" -H 'X-Upload-Token: <token>'")
-    } else {
-        String::new()
-    };
-    // site_url is injected so the CLI quickstart shows the actual server URL
-    render_template(
-        &templates.upload,
-        &[
-            ("{{title}}", title),
-            ("{{description}}", description),
-            ("{{site_url}}", base_url.to_string()),
-            ("{{auth_required}}", auth_required.to_string()),
-            ("{{auth_snippet}}", auth_snippet),
-            ("{{max_file_size}}", config.max_file_size.to_string()),
-            ("{{expiry_options}}", expiry_options_html(config)),
-        ],
-    )
+    UploadTemplate {
+        title: config.brand_title.clone(),
+        auth_required,
+        // The page only learns whether a token is needed, never the token
+        // itself. The quickstart shows the proxy-safe header (see
+        // upload_authorized). Askama escapes it on the way out.
+        auth_snippet: if auth_required {
+            " -H 'X-Upload-Token: <token>'".to_string()
+        } else {
+            String::new()
+        },
+        max_file_size: config.max_file_size,
+        // site_url is injected so the CLI quickstart shows the actual server URL
+        site_url: base_url.to_string(),
+        expiry_choices: expiry_choices(config),
+    }
+    .render_page()
 }
 
-fn render_admin_page(templates: &Templates, config: &AppConfig, body: String) -> String {
-    render_template(
-        &templates.admin,
-        &[
-            ("{{title}}", escape_html(&config.brand_title)),
-            ("{{admin_body}}", body),
-        ],
-    )
+fn render_admin_page(config: &AppConfig, body: String) -> String {
+    AdminTemplate {
+        title: config.brand_title.clone(),
+        admin_body: body,
+    }
+    .render_page()
 }
 
 fn render_admin_login() -> String {
@@ -1880,17 +1883,15 @@ fn render_admin_list(records: &[UploadRecord], token: &str) -> String {
     )
 }
 
-fn render_delete_page(record: &UploadRecord, templates: &Templates, config: &AppConfig) -> String {
-    render_template(
-        &templates.delete,
-        &[
-            ("{{title}}", escape_html(&config.brand_title)),
-            ("{{filename}}", escape_html(&record.original_filename)),
-            ("{{size}}", human_size(record.size_bytes)),
-            ("{{code}}", record.code.clone()),
-            ("{{token}}", escape_html(&record.delete_token)),
-        ],
-    )
+fn render_delete_page(record: &UploadRecord, config: &AppConfig) -> String {
+    DeleteTemplate {
+        title: config.brand_title.clone(),
+        filename: record.original_filename.clone(),
+        size: human_size(record.size_bytes),
+        code: record.code.clone(),
+        token: record.delete_token.clone(),
+    }
+    .render_page()
 }
 
 // Cap on how much of an upload we read to show inline on the download page.
@@ -1908,54 +1909,25 @@ fn render_download_page(
     record: &UploadRecord,
     base_url: &str,
     inline: Option<&str>,
-    templates: &Templates,
     config: &AppConfig,
 ) -> String {
-    let title = escape_html(&config.brand_title);
-    let description = escape_html(&config.brand_description);
-    let filename = escape_html(&record.original_filename);
     let encoded = urlencoding::encode(&record.original_filename);
-    let download_url = format!("{base_url}/raw/{}/{}", record.code, encoded);
-    let download_page_url = format!("{base_url}/{}", record.code);
-    let expires_in = format_duration(record.expires_at - Utc::now());
-    let created_at = record.created_at.to_rfc3339();
-    let size = human_size(record.size_bytes);
-    let sha256_block = if record.sha256_hex.is_empty() {
-        String::new()
-    } else {
-        let hex = &record.sha256_hex;
-        format!(
-            r#"<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
-        )
-    };
-    // The text is escaped into a <pre>; the copy button reads it back from the
-    // element via data-copy-from, so the content isn't duplicated into an attr.
-    // Note: r##"..."## — the markup contains `"#` (data-copy-from="#...),
-    // which would close a plain r#"..."# raw string early.
-    let content_block = match inline {
-        Some(text) => format!(
-            r##"<div class="content-block"><div class="content-head"><span class="row-label">Contents</span><button type="button" data-copy-from="#file-contents">Copy</button></div><pre id="file-contents">{}</pre></div>"##,
-            escape_html(text)
-        ),
-        None => String::new(),
-    };
-
-    render_template(
-        &templates.download,
-        &[
-            ("{{title}}", title),
-            ("{{description}}", description),
-            ("{{filename}}", filename),
-            ("{{size}}", size),
-            ("{{created_at}}", created_at),
-            ("{{expires_in}}", expires_in),
-            ("{{download_url}}", download_url.clone()),
-            ("{{download_page_url}}", download_page_url),
-            ("{{curl_url}}", download_url),
-            ("{{sha256_block}}", sha256_block),
-            ("{{content_block}}", content_block),
-        ],
-    )
+    DownloadTemplate {
+        title: config.brand_title.clone(),
+        description: config.brand_description.clone(),
+        filename: record.original_filename.clone(),
+        size: human_size(record.size_bytes),
+        created_at: record.created_at.to_rfc3339(),
+        expires_in: format_duration(record.expires_at - Utc::now()),
+        download_url: format!("{base_url}/raw/{}/{}", record.code, encoded),
+        download_page_url: format!("{base_url}/{}", record.code),
+        sha256_hex: record.sha256_hex.clone(),
+        // The template escapes the text into a <pre>; the copy button reads it
+        // back from the element via data-copy-from, so the content is never
+        // duplicated into an attribute.
+        inline_text: inline.map(str::to_string),
+    }
+    .render_page()
 }
 
 #[cfg(test)]
@@ -1980,14 +1952,12 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        let templates = load_templates().await.unwrap();
         let config = test_config(data_dir);
         AppState {
             pool,
             upload_limiter: RateLimiter::new(config.upload_rate_per_min),
             lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
             config,
-            templates,
         }
     }
 
@@ -2141,15 +2111,8 @@ mod tests {
 
     #[test]
     fn upload_page_file_input_not_required() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let config = test_config(PathBuf::from("./data"));
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(
             !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
             "file input must not have the required attribute (breaks drag-and-drop)"
@@ -2358,8 +2321,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(tmp.path()).await;
         let html = download_page_html(&state, "xss.txt", b"<script>alert(1)</script>".to_vec()).await;
-        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "must be escaped");
-        assert!(!html.contains("<script>alert(1)</script>"), "raw tag must never appear");
+        // Assert the security property, not one particular entity spelling:
+        // the escaper emits numeric entities (&#60;) rather than named ones.
+        // Scoped to the injected payload, since the page has its own <script>
+        // tags for qr.js and app.js.
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "raw payload must never appear"
+        );
+        assert!(html.contains("alert(1)"), "the text itself should still be shown");
+        assert!(html.contains("content-block"), "rendered inline as text");
     }
 
     #[tokio::test]
@@ -3547,16 +3518,9 @@ mod tests {
 
     #[test]
     fn upload_page_shows_token_field_when_auth_enabled() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let mut config = test_config(PathBuf::from("./data"));
         config.upload_token = Some("s3cret".to_string());
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="true""#));
         assert!(html.contains("X-Upload-Token"), "quickstart should show the auth header");
         assert!(!html.contains("s3cret"), "the token itself must never reach the page");
@@ -3564,32 +3528,25 @@ mod tests {
 
     #[test]
     fn upload_page_hides_token_field_when_open() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let config = test_config(PathBuf::from("./data"));
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
         assert!(!html.contains("X-Upload-Token"));
     }
 
     #[test]
     fn upload_page_embeds_max_file_size() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let mut config = test_config(PathBuf::from("./data"));
         config.max_file_size = 1234;
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-max-file-size="1234""#));
+    }
+
+    fn choice_values(config: &AppConfig) -> Vec<String> {
+        expiry_choices(config)
+            .into_iter()
+            .map(|choice| choice.value)
+            .collect()
     }
 
     #[test]
@@ -3597,23 +3554,57 @@ mod tests {
         let mut config = test_config(PathBuf::from("./data"));
         config.default_expiry = Duration::from_secs(3600);
         config.max_expiry = Duration::from_secs(3600);
-        let html = expiry_options_html(&config);
-        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
-        assert!(html.contains(r#"value="30m""#));
-        assert!(!html.contains("1d"), "options above max_expiry must be dropped: {html}");
-        assert!(!html.contains("7d"));
-        assert!(!html.contains(r#"value="1h""#), "default must not be duplicated");
+        let choices = expiry_choices(&config);
+        assert_eq!(choices[0].value, "");
+        assert_eq!(choices[0].label, "1h (default)");
+        let values = choice_values(&config);
+        assert!(values.contains(&"30m".to_string()));
+        assert!(
+            !values.contains(&"1d".to_string()),
+            "options above max_expiry must be dropped: {values:?}"
+        );
+        assert!(!values.contains(&"7d".to_string()));
+        assert!(
+            !values.contains(&"1h".to_string()),
+            "default must not be duplicated"
+        );
     }
 
     #[test]
     fn expiry_options_skip_default_duplicate() {
         // test_config: default 1h, bounds 5m..1d
         let config = test_config(PathBuf::from("./data"));
-        let html = expiry_options_html(&config);
-        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
-        assert!(html.contains(r#"value="30m""#));
-        assert!(html.contains(r#"value="1d""#));
-        assert!(!html.contains(r#"value="1h""#));
-        assert!(!html.contains("7d"));
+        let choices = expiry_choices(&config);
+        assert_eq!(choices[0].value, "");
+        assert_eq!(choices[0].label, "1h (default)");
+        let values = choice_values(&config);
+        assert!(values.contains(&"30m".to_string()));
+        assert!(values.contains(&"1d".to_string()));
+        assert!(!values.contains(&"1h".to_string()));
+        assert!(!values.contains(&"7d".to_string()));
+    }
+
+    // The old String::replace renderer substituted placeholders sequentially
+    // over the whole document, so a value could be re-substituted by a later
+    // pass. Compiled templates interpolate once, per slot.
+    #[tokio::test]
+    async fn placeholder_shaped_filename_is_not_re_substituted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "{{download_url}}".to_string(),
+            stored_path: String::new(),
+            size_bytes: 3,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(
+            html.contains("{{download_url}}"),
+            "the filename must render literally, not as the URL it names"
+        );
     }
 }

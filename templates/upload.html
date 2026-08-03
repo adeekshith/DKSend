@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{{title}}</title>
+    <title>{{ title }}</title>
     <link rel="stylesheet" href="/static/app.css?v=12">
   </head>
   <body>
     <main class="shell">
       <header class="hero">
-        <h1>{{title}}</h1>
+        <h1>{{ title }}</h1>
       </header>
       <section class="card">
-        <form id="upload-form" data-auth-required="{{auth_required}}" data-max-file-size="{{max_file_size}}" data-mode="file">
+        <form id="upload-form" data-auth-required="{{ auth_required }}" data-max-file-size="{{ max_file_size }}" data-mode="file">
           <div class="mode-toggle" role="tablist">
             <button type="button" class="mode-tab" data-mode-set="file" aria-selected="true">File</button>
             <button type="button" class="mode-tab" data-mode-set="text" aria-selected="false">Text</button>
@@ -32,8 +32,8 @@
             <label>
               Expiry
               <select id="expiry">
-                <!-- Options are rendered server-side from DEFAULT_EXPIRY/MAX_EXPIRY -->
-                {{expiry_options}}
+                {#- Rendered from the server's DEFAULT_EXPIRY/MIN_EXPIRY/MAX_EXPIRY -#}
+                {% for choice in expiry_choices %}<option value="{{ choice.value }}">{{ choice.label }}</option>{% endfor %}
               </select>
             </label>
           </div>
@@ -50,8 +50,8 @@
       <section class="notes">
         <div>
           <h2>CLI quickstart</h2>
-          <!-- {{site_url}} is replaced server-side with the actual request origin -->
-          <pre>curl{{auth_snippet}} --upload-file ./hello.txt {{site_url}}</pre>
+          {#- site_url is the actual request origin, resolved server-side -#}
+          <pre>curl{{ auth_snippet }} --upload-file ./hello.txt {{ site_url }}</pre>
         </div>
       </section>
     </main>

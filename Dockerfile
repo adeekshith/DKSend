@@ -7,6 +7,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY static ./static
+COPY templates ./templates
 COPY migrations ./migrations
 RUN cargo build --release \
     && cp /app/target/release/dksend /dksend
