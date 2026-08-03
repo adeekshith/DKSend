@@ -103,7 +103,7 @@ body {
 
 .row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
   margin-top: 20px;
 }
@@ -304,9 +304,13 @@ button:hover,
   font-size: 12px;
 }
 
+/* minmax(0, 1fr) rather than 1fr: a bare 1fr track cannot shrink below its
+   item's min-content, and the item holds an unwrapped curl command. That made
+   the track wider than the viewport on narrow screens and scrolled the whole
+   page sideways. */
 .notes {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: center;
   gap: 20px;
   text-align: center;
@@ -315,6 +319,7 @@ button:hover,
 .notes > div {
   width: 100%;
   max-width: 480px;
+  min-width: 0;
 }
 
 .notes h2 {
@@ -539,9 +544,11 @@ button:hover,
     font-size: 40px;
   }
 
-  .row,
-  .notes {
-    grid-template-columns: 1fr;
+  /* .notes is already single-column at every width, and re-declaring it here
+     as a bare 1fr would undo the minmax(0, 1fr) that keeps it from scrolling
+     the page sideways. */
+  .row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .link-row {
