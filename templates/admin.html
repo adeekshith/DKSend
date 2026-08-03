@@ -32,7 +32,7 @@
               <td>
                 <form method="post" action="/admin/delete/{{ row.code }}">
                   <input type="hidden" name="token" value="{{ token }}">
-                  <button type="submit">Delete</button>
+                  <button type="submit" class="btn btn-secondary btn-sm">Delete</button>
                 </form>
               </td>
             </tr>
@@ -45,7 +45,7 @@
           <label>Admin token (UPLOAD_TOKEN)
             <input type="password" name="token" autocomplete="off" required>
           </label>
-          <button type="submit">View uploads</button>
+          <button type="submit" class="btn btn-primary btn-block">View uploads</button>
         </form>
         {%- endif %}
       </section>

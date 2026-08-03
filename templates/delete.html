@@ -10,8 +10,8 @@
         <form method="post" action="/delete/{{ code }}">
           <input type="hidden" name="token" value="{{ token }}">
           <div class="result-actions">
-            <button type="submit">Delete file</button>
-            <a href="/{{ code }}">Cancel</a>
+            <button type="submit" class="btn btn-primary">Delete file</button>
+            <a class="btn btn-secondary" href="/{{ code }}">Cancel</a>
           </div>
         </form>
       </section>

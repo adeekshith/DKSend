@@ -15,31 +15,31 @@
         <div class="content-block">
           <div class="content-head">
             <span class="row-label">Contents</span>
-            <button type="button" data-copy-from="#file-contents">Copy</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-from="#file-contents">Copy</button>
           </div>
           <pre id="file-contents">{{ text }}</pre>
         </div>
         {%- endif %}
         <div class="actions">
-          <a class="primary" href="{{ download_url }}">Download</a>
+          <a class="btn btn-primary" href="{{ download_url }}">Download</a>
         </div>
         <div class="qr-block" data-qr="{{ download_page_url }}"></div>
         <div class="link-list">
           <div class="link-row">
             <span class="row-label">Page</span>
             <input type="text" readonly value="{{ download_page_url }}">
-            <button type="button" data-copy="{{ download_page_url }}">Copy</button>
+            <button type="button" class="btn btn-secondary" data-copy="{{ download_page_url }}">Copy</button>
           </div>
           <div class="link-row">
             <span class="row-label">Raw</span>
             <input type="text" readonly value="{{ download_url }}">
-            <button type="button" data-copy="{{ download_url }}">Copy</button>
+            <button type="button" class="btn btn-secondary" data-copy="{{ download_url }}">Copy</button>
           </div>
           {%- if !sha256_hex.is_empty() %}
           <div class="link-row hash-row">
             <span class="row-label">SHA-256</span>
             <input type="text" readonly value="{{ sha256_hex }}">
-            <button type="button" data-copy="{{ sha256_hex }}">Copy</button>
+            <button type="button" class="btn btn-secondary" data-copy="{{ sha256_hex }}">Copy</button>
           </div>
           {%- endif %}
         </div>
