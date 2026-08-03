@@ -3187,14 +3187,85 @@ mod tests {
         );
     }
 
+    // Returns the markup between <header class="hero"> and </header>.
+    fn hero_of(html: &str) -> String {
+        let start = html
+            .find(r#"<header class="hero">"#)
+            .expect("every page has a hero");
+        let end = html[start..].find("</header>").expect("hero must close") + start;
+        html[start..end].to_string()
+    }
+
+    // BRAND_DESCRIPTION is optional. Unset, it must leave no trace: no element,
+    // empty or otherwise. The layout half of this — that no space is reserved
+    // either — is asserted in tests/e2e/no-description.spec.ts, which needs a
+    // real browser to measure.
     #[test]
-    fn upload_page_omits_an_empty_description() {
+    fn upload_page_omits_the_description_when_unset() {
         let mut config = test_config(PathBuf::from("./data"));
         config.brand_description = String::new();
-        let html = render_upload_page(&config, "https://example.com");
+        let hero = hero_of(&render_upload_page(&config, "https://example.com"));
         assert!(
-            !html.contains("<p></p>"),
-            "an unset description must not leave an empty paragraph"
+            !hero.contains("<p"),
+            "an unset description must not emit a paragraph at all, got: {hero}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_page_omits_the_description_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.brand_description = String::new();
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "quiet.txt".to_string(),
+            stored_path: String::new(),
+            size_bytes: 12,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let hero = hero_of(&render_download_page(
+            &record,
+            "https://example.com",
+            None,
+            &state.config,
+        ));
+        assert!(
+            !hero.contains("<p"),
+            "the download hero must not emit a paragraph either, got: {hero}"
+        );
+    }
+
+    // The whole point of the space fix: nothing about the heading's own box
+    // should depend on whether a description follows it.
+    #[test]
+    fn the_heading_carries_no_bottom_margin() {
+        let css = std::fs::read_to_string("static/app.css").unwrap();
+        let hero_rule = css
+            .split(".hero h1 {")
+            .nth(1)
+            .expect(".hero h1 rule must exist")
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            hero_rule.contains("margin: 0;"),
+            "a bottom margin here would reserve space for an absent description: {hero_rule}"
+        );
+        let hero_container = css
+            .split("\n  .hero {")
+            .nth(1)
+            .expect(".hero rule must exist")
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            hero_container.contains("gap:"),
+            "spacing between hero children must come from a gap: {hero_container}"
         );
     }
 

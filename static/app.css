@@ -148,14 +148,22 @@
     width: 100%;
   }
 
+  /* A gap rather than a margin on the heading. BRAND_DESCRIPTION is optional,
+     and a heading margin-bottom applies whether or not anything follows it, so
+     an instance with no description still reserved 12px for the tagline it did
+     not have. gap only materialises between siblings, so one child means no
+     surplus space and the rhythm below the heading is purely .shell's 32px. */
   .hero {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
     text-align: center;
   }
 
   .hero h1 {
     /* Fluid rather than a fixed 56px plus a breakpoint override. */
     font-size: clamp(2rem, 1.25rem + 4vw, 3.5rem);
-    margin: 0 0 12px;
+    margin: 0;
     letter-spacing: -1px;
   }
 
