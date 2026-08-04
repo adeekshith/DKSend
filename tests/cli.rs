@@ -29,8 +29,6 @@ fn startup_fails_fast_when_files_dir_not_writable() {
         .env("DATA_DIR", tmp.path())
         .env("PORT", "0")
         .env("ACCESS_LOG", "0")
-        // Templates load from static/ relative to the working directory
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();
 

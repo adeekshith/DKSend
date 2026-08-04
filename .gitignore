@@ -3,3 +3,7 @@
 /tests/e2e/node_modules
 /tests/e2e/test-results
 /tests/e2e/playwright-report
+# Local environment overrides; may hold UPLOAD_TOKEN, which is a full
+# admin credential (see README).
+/.env
+/.env.*

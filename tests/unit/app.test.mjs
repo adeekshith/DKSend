@@ -180,7 +180,7 @@ function makeFakeXhrClass(getResponse, manual) {
 function loadApp(dom, opts = {}) {
   const { document } = dom;
   // Inject globals and evaluate app.js
-  const code = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const code = readFileSync(new URL('../../static/app.js', import.meta.url), 'utf8');
   const wrapped = new Function('document', 'navigator', 'fetch', 'setTimeout', 'window', 'XMLHttpRequest', code);
   const responses = opts.responses ? [...opts.responses] : [];
   const getResponse = () => (responses.length ? responses.shift() : { status: 200, json: SUCCESS_JSON });
@@ -464,6 +464,44 @@ describe('drag and drop upload', () => {
     ctx2.instances[0].respond();
   });
 
+  // Guards the redraw budget: xhr fires progress per network chunk, and each
+  // redraw re-parses every finished card in the panel.
+  it('redraws only when the displayed percentage changes', async () => {
+    const dom2 = makeDom();
+    const ctx2 = loadApp(dom2, { manual: true });
+
+    // Count innerHTML writes on the result panel.
+    let writes = 0;
+    let stored = '';
+    Object.defineProperty(dom2.resultDiv, 'innerHTML', {
+      configurable: true,
+      get: () => stored,
+      set: (value) => {
+        stored = value;
+        writes += 1;
+      },
+    });
+
+    const file = { name: 'chunky.bin', size: 10000 };
+    dom2.dropZone.dispatchEvent(makeEvent('drop', { dataTransfer: { files: [file] } }));
+    dom2.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const before = writes;
+    // 40 events that all land on 1% — the user sees no change.
+    for (let loaded = 100; loaded < 140; loaded += 1) {
+      ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded, total: 10000 });
+    }
+    assert.equal(writes - before, 1, `expected one redraw for one percentage, got ${writes - before}`);
+
+    // Crossing into 2% must still redraw.
+    ctx2.instances[0].upload.onprogress({ lengthComputable: true, loaded: 200, total: 10000 });
+    assert.equal(writes - before, 2);
+    assert.ok(dom2.resultDiv.innerHTML.includes('2%'), 'the new percentage should be shown');
+
+    ctx2.instances[0].respond();
+  });
+
   it('shows the server error message when the response is not success', async () => {
     const dom2 = makeDom();
     loadApp(dom2, {
@@ -585,6 +623,16 @@ describe('drag and drop upload', () => {
     dispatchPaste(dom, [file]);
     assert.ok(dom.spanEl.textContent.startsWith('pasted-'), `label is ${dom.spanEl.textContent}`);
     assert.ok(dom.spanEl.textContent.endsWith('.png'));
+  });
+
+  // Pasting a file while in text mode used to update selectedFiles and the
+  // hidden drop label, then submit ignored it because dataset.mode was 'text'.
+  it('pasting a file while in text mode switches back to file mode', () => {
+    dom.uploadForm.dataset.mode = 'text';
+    const file = { name: 'shot.png', size: 100, type: 'image/png' };
+    dispatchPaste(dom, [file]);
+    assert.equal(dom.uploadForm.dataset.mode, 'file', 'a pasted file must not be ignored');
+    assert.ok(dom.spanEl.textContent.startsWith('pasted-'));
   });
 
   it('pasted image upload uses a generated mime-derived filename', async () => {
@@ -752,61 +800,118 @@ describe('drag and drop upload', () => {
 
 describe('upload.html template', () => {
   it('file input does not have required attribute', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     // The file input should not be required so drag-and-drop works
     assert.ok(!html.match(/<input[^>]*type="file"[^>]*required/),
       'file input must not have required attribute');
   });
 
   it('has drop-zone element', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="drop-zone"'));
   });
 
   it('has upload form', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('id="upload-form"'));
   });
 
   it('keeps the CLI quickstart docs and drops the Raw downloads blurb', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('CLI quickstart'), 'CLI quickstart should remain');
     assert.ok(!html.includes('Raw downloads'), 'Raw downloads section should be removed');
   });
 
   it('injects expiry options from the server', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
-    assert.ok(html.includes('{{expiry_options}}'), 'expiry options come from server config');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
+    assert.ok(
+      /\{%\s*for choice in expiry_choices\s*%\}/.test(html),
+      'expiry options come from server config',
+    );
     assert.ok(!html.includes('value="30m"'), 'no hardcoded expiry options');
   });
 
   it('exposes the configured max file size on the form', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
-    assert.ok(html.includes('data-max-file-size="{{max_file_size}}"'));
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
+    assert.ok(/data-max-file-size="\{\{\s*max_file_size\s*\}\}"/.test(html));
   });
 
   it('file input allows multiple files', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(/<input[^>]*type="file"[^>]*multiple/.test(html));
   });
 
   it('has a File/Text mode toggle and a text input, defaulting to file', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(html.includes('data-mode="file"'), 'form defaults to file mode');
     assert.ok(html.includes('data-mode-set="text"'), 'text tab present');
     assert.ok(html.includes('id="text-input"'), 'textarea present');
   });
 
   it('loads the QR library before app.js', () => {
-    const html = readFileSync(new URL('./upload.html', import.meta.url), 'utf8');
+    const html = readFileSync(new URL('../../templates/upload.html', import.meta.url), 'utf8');
     assert.ok(html.indexOf('/static/qr.js') !== -1);
     assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
   });
 
   it('download page has a QR placeholder and the QR library', () => {
-    const html = readFileSync(new URL('./download.html', import.meta.url), 'utf8');
-    assert.ok(html.includes('data-qr="{{download_page_url}}"'));
+    const html = readFileSync(new URL('../../templates/download.html', import.meta.url), 'utf8');
+    assert.ok(/data-qr="\{\{\s*download_page_url\s*\}\}"/.test(html));
     assert.ok(html.indexOf('/static/qr.js') !== -1);
     assert.ok(html.indexOf('/static/qr.js') < html.indexOf('/static/app.js'));
+  });
+});
+
+describe('interpolated values are escaped', () => {
+  const HOSTILE = '<img src=x onerror=alert(1)>.txt';
+
+  it('a hostile filename is escaped in the result card', async () => {
+    const dom = makeDom();
+    loadApp(dom, {
+      responses: [{ status: 200, json: { ...SUCCESS_JSON, filename: HOSTILE } }],
+    });
+    dom.fileInput.files = [{ name: HOSTILE, size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(!html.includes('<img src=x'), `raw markup must not reach the DOM: ${html}`);
+    assert.ok(html.includes('&lt;img src=x'), 'the name should still be shown, escaped');
+  });
+
+  it('a hostile filename is escaped in an error card', async () => {
+    const dom = makeDom();
+    loadApp(dom, {
+      responses: [{ status: 500, json: { success: false, error: { message: '<b>boom</b>' } } }],
+    });
+    dom.fileInput.files = [{ name: HOSTILE, size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const html = dom.resultDiv.innerHTML;
+    assert.ok(!html.includes('<img src=x'), 'filename must be escaped');
+    assert.ok(!html.includes('<b>boom</b>'), 'the server message must be escaped too');
+    assert.ok(html.includes('&lt;b&gt;boom'), 'and still be readable');
+  });
+
+  it('a quote in a filename cannot break out of an attribute', async () => {
+    const dom = makeDom();
+    const nasty = 'a" onmouseover="alert(1)';
+    loadApp(dom, {
+      responses: [
+        { status: 200, json: { ...SUCCESS_JSON, download_page_url: `http://x/${nasty}` } },
+      ],
+    });
+    dom.fileInput.files = [{ name: 'q.txt', size: 10 }];
+    dom.fileInput.dispatchEvent(makeEvent('change'));
+    dom.uploadForm.dispatchEvent(makeEvent('submit'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.ok(
+      !dom.resultDiv.innerHTML.includes('onmouseover="'),
+      'a bare quote must not terminate the attribute',
+    );
   });
 });

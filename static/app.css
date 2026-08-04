@@ -1,548 +1,746 @@
-:root {
-  color-scheme: light dark;
-  /* One source of truth per token via light-dark(); the element's used
-     color-scheme (inherited `light dark` here) picks the value. */
-  --bg: light-dark(#f4f4f2, #10100f);
-  --card: light-dark(#ffffff, #181816);
-  --ink: light-dark(#1c1c1a, #f1f1ed);
-  --accent: light-dark(#2563eb, #6ea8ff);
-  --accent-dark: light-dark(#1d4ed8, #93c0ff);
-  --muted: light-dark(#6b6b63, #a7a79c);
-  --stroke: light-dark(#d7d7d2, #2a2a27);
-  /* light-dark() only takes colors, so the shadow geometry is shared
-     (was 12px offset in dark — an imperceptible 2px change). */
-  --shadow: 0 10px 30px light-dark(rgba(28, 28, 26, 0.08), rgba(0, 0, 0, 0.4));
-  --code-bg: light-dark(#1a1a19, #0b0b0a);
-  --code-ink: light-dark(#f2f2ef, #f1f1ed);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
-  background: var(--bg);
-  color: var(--ink);
-}
-
-.shell {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 48px 20px 80px;
-  display: flex;
-  flex-direction: column;
-  gap: 32px;
-  align-items: center;
-}
-
-.shell > * {
-  width: 100%;
-}
-
-.hero {
-  text-align: center;
-}
-
-.hero h1 {
-  font-size: 56px;
-  margin: 0 0 12px;
-  letter-spacing: -1px;
-}
-
-.hero p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 18px;
-}
-
-.card {
-  background: var(--card);
-  border: 1px solid var(--stroke);
-  border-radius: 18px;
-  padding: 28px;
-  box-shadow: var(--shadow);
-  text-align: center;
-}
-
-.card form {
-  text-align: left;
-}
-
-.drop {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--stroke);
-  border-radius: 20px;
-  padding: 32px;
-  cursor: pointer;
-  background: transparent;
-  text-align: center;
-}
-
-.drop input {
-  display: none;
-}
-
-.drop.dragging {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--card), var(--accent) 6%);
-}
-
-.row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-top: 20px;
-}
-
-.token-row {
-  grid-template-columns: 1fr;
-}
-
-#upload-form[data-auth-required="false"] .token-row {
-  display: none;
-}
-
-.mode-toggle {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 16px;
-  padding: 4px;
-  border: 1px solid var(--stroke);
-  border-radius: 12px;
-  width: fit-content;
-}
-
-.mode-tab {
-  margin-top: 0;
-  padding: 6px 18px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.mode-tab[aria-selected="true"] {
-  background: var(--accent);
-  color: #ffffff;
-}
-
-.mode-tab:hover {
-  background: color-mix(in srgb, var(--card), var(--accent) 10%);
-  color: var(--ink);
-}
-
-.mode-tab[aria-selected="true"]:hover {
-  background: var(--accent-dark);
-  color: #ffffff;
-}
-
-.text-row {
-  margin-top: 0;
-}
-
-#text-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 160px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 14px;
-}
-
-#upload-form[data-mode="file"] .text-row {
-  display: none;
-}
-
-#upload-form[data-mode="text"] .drop {
-  display: none;
-}
-
-label {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--muted);
-}
-
-input,
-select {
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--stroke);
-  font-size: 15px;
-  font-family: inherit;
-  background: transparent;
-  color: var(--ink);
-}
-
-button,
-.primary {
-  margin-top: 18px;
-  padding: 12px 18px;
-  border-radius: 12px;
-  border: none;
-  background: var(--accent);
-  color: #ffffff;
-  font-weight: 600;
-  font-size: 15px;
-  cursor: pointer;
-  text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-button:hover,
-.primary:hover {
-  background: var(--accent-dark);
-  color: #ffffff;
-}
-
-.result {
-  margin-top: 20px;
-  padding: 16px;
-  border-radius: 14px;
-  background: var(--card);
-  border: 1px solid var(--stroke);
-}
-
-.result.hidden,
-.hidden {
-  display: none;
-}
-
-.result a {
-  color: var(--accent-dark);
-  font-weight: 600;
-}
-
-.result-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 16px;
-  justify-content: center;
-  align-items: center;
-}
-
-/* Both actions share the same secondary/outline style and one baseline:
-   reset the default button top margin and give the anchor matching button
-   geometry so the row stays aligned. */
-.result-actions a,
-.result-actions button {
-  margin-top: 0;
-  padding: 12px 18px;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 600;
-  text-decoration: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  background: var(--card);
-  border: 1px solid var(--stroke);
-  color: var(--ink);
-}
-
-.result-actions a:hover,
-.result-actions button:hover {
-  background: var(--card);
-  border-color: var(--accent);
-  color: var(--accent-dark);
-}
-
-.link-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.link-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.link-row input {
-  flex: 1;
-}
-
-.link-row button {
-  margin-top: 0;
-  white-space: nowrap;
-}
-
-.row-label {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  white-space: nowrap;
-  min-width: 64px;
-  text-align: right;
-}
-
-.hash-row input {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-}
-
-.notes {
-  display: grid;
-  grid-template-columns: 1fr;
-  justify-items: center;
-  gap: 20px;
-  text-align: center;
-}
-
-.notes > div {
-  width: 100%;
-  max-width: 480px;
-}
-
-.notes h2 {
-  margin: 0 0 8px;
-  font-size: 18px;
-}
-
-.notes pre {
-  background: var(--code-bg);
-  color: var(--code-ink);
-  padding: 16px;
-  border-radius: 12px;
-  overflow: auto;
-  text-align: left;
-}
-
-.file-meta h2 {
-  margin: 0 0 8px;
-  font-size: 28px;
-}
-
-.file-meta p {
-  margin: 6px 0;
-  color: var(--muted);
-}
-
-.expiry {
-  color: color-mix(in srgb, var(--accent-dark), var(--ink) 20%);
-  font-weight: 600;
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 20px;
-  justify-content: center;
-}
-
-.actions button {
-  background: var(--card);
-  border: 1px solid var(--stroke);
-  color: var(--ink);
-}
-
-.code {
-  margin-top: 20px;
-  background: var(--code-bg);
-  color: var(--code-ink);
-  padding: 16px;
-  border-radius: 12px;
-}
-
-.code span {
-  font-size: 12px;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--accent), white 20%);
-}
-
-.code pre {
-  margin: 8px 0 0;
-  overflow: auto;
-}
-
-.content-block {
-  margin-top: 20px;
-  text-align: left;
-}
-
-.content-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.content-head button {
-  margin-top: 0;
-  white-space: nowrap;
-}
-
-.content-block pre {
-  margin: 0;
-  background: var(--code-bg);
-  color: var(--code-ink);
-  padding: 16px;
-  border-radius: 12px;
-  max-height: 420px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-}
-
-.warn {
-  color: color-mix(in srgb, var(--accent), var(--ink) 20%);
-  font-weight: 600;
-}
-
-.file-card {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--stroke);
-  text-align: center;
-}
-
-.file-card:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-
-.file-card-error p {
-  margin: 6px 0;
-}
-
-.qr-block {
-  display: flex;
-  justify-content: center;
-  margin-top: 16px;
-}
-
-/* Hide the tile entirely if qr.js failed to load */
-.qr-block:empty {
-  display: none;
-}
-
-/* Always black-on-white: inverted QR codes scan unreliably, so no
-   dark-mode treatment here */
-.qr-block svg {
-  width: 148px;
-  height: 148px;
-  padding: 10px;
-  background: #fff;
-  border: 1px solid var(--stroke);
-  border-radius: 12px;
-}
-
-.upload-progress {
-  margin-top: 4px;
-  text-align: center;
-}
-
-.upload-progress progress {
-  width: 100%;
-  height: 10px;
-  accent-color: var(--accent);
-}
-
-.progress-text {
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.admin-card {
-  text-align: left;
-  overflow-x: auto;
-}
-
-.admin-login {
-  max-width: 360px;
-  margin: 0 auto;
-}
-
-.admin-empty {
-  text-align: center;
-  color: var(--muted);
-}
-
-.admin-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-
-.admin-table th,
-.admin-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--stroke);
-  text-align: left;
-}
-
-.admin-table th {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-
-.admin-table td form {
-  display: inline;
-}
-
-.admin-table td form button {
-  margin-top: 0;
-  padding: 6px 12px;
-  font-size: 13px;
-  background: var(--card);
-  border: 1px solid var(--stroke);
-  color: var(--ink);
-}
-
-.admin-table td form button:hover {
-  border-color: var(--accent);
-  color: var(--accent-dark);
-  background: var(--card);
-}
-
-.admin-table a {
-  color: var(--accent-dark);
-  font-weight: 600;
-}
-
-.result h3,
-.file-meta {
-  text-align: center;
-}
-
-@media (max-width: 720px) {
-  .hero h1 {
-    font-size: 40px;
+/* Layer order is declared once, up front, so the cascade is decided by intent
+   rather than by where a rule happens to sit in the file. Components beat base,
+   utilities beat components — which is what lets .btn-secondary restyle a
+   button without needing to out-specify anything. */
+@layer tokens, base, components, utilities;
+
+@layer tokens {
+  :root {
+    color-scheme: light dark;
+    /* One source of truth per token via light-dark(); the element's used
+       color-scheme (inherited `light dark` here) picks the value. */
+    --bg: light-dark(#f4f4f2, #10100f);
+    --card: light-dark(#ffffff, #181816);
+    --ink: light-dark(#1c1c1a, #f1f1ed);
+    --muted: light-dark(#6b6b63, #a7a79c);
+    /* The accent splits by role, because one token cannot serve both:
+       --accent-hover is a *background* and must darken in both schemes, while
+       --link is *text on a card* and must lighten in dark mode. The old
+       --accent-dark did both, so it lightened for the sake of link text and
+       dropped white-on-accent buttons to 1.87:1 on hover — hovering a button
+       made it harder to read. */
+    --accent: light-dark(#2563eb, #2f6fe0);
+    --accent-hover: light-dark(#1d4ed8, #1e5fd0);
+    --on-accent: #ffffff;
+    --link: light-dark(#1d4ed8, #8fbaff);
+    /* --stroke is for decoration only: hairline dividers between table rows and
+       result cards, where a stronger value would read as noise. Anything the
+       user can interact with uses --stroke-strong, which clears the 3:1 that
+       WCAG 1.4.11 asks of a control's boundary. --stroke alone was 1.24:1 in
+       dark and 1.44:1 in light, so fields barely registered as fields. */
+    --stroke: light-dark(#d7d7d2, #2a2a27);
+    --stroke-strong: light-dark(#84847e, #727269);
+    /* A fill of its own is what actually makes a field look like a field; the
+       border only has to confirm it. */
+    --field-bg: light-dark(#f7f7f5, #222220);
+    --ring: light-dark(#2563eb, #6ea8ff);
+    /* Destructive and cautionary states had no colour of their own, so the
+       irreversible Delete button was the same friendly blue as Upload and
+       upload failures were reported in accent blue — reading as information
+       rather than as errors. */
+    --danger: light-dark(#c02626, #d13c3c);
+    --danger-hover: light-dark(#a11d1d, #b82f2f);
+    --danger-ink: light-dark(#b3261e, #ff9b9b);
+    --warn-ink: light-dark(#8a5a00, #ffca6b);
+    /* light-dark() only takes colors, so the shadow geometry is shared
+       (was 12px offset in dark — an imperceptible 2px change). */
+    --shadow: 0 10px 30px light-dark(rgba(28, 28, 26, 0.08), rgba(0, 0, 0, 0.4));
+    --code-bg: light-dark(#1a1a19, #0b0b0a);
+    --code-ink: light-dark(#f2f2ef, #f1f1ed);
+  }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
   }
 
-  .row,
-  .notes {
-    grid-template-columns: 1fr;
+  /* "Space Grotesk" was named here but never loaded — no @font-face, no font
+     link anywhere in the project — so it silently fell through to Avenir Next
+     on macOS, Segoe UI on Windows, and a generic sans-serif on Linux and
+     Android. Since DKSend ships as a single binary with no external services,
+     a webfont request is out; system-ui gives every platform its own native UI
+     font for zero bytes and no flash of unstyled text. */
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+      Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  /* textarea belongs here too: left out, it kept the UA's own border, radius,
+     and padding and visibly mismatched every other field on the form. */
+  input,
+  select,
+  textarea {
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--stroke-strong);
+    font-size: 15px;
+    font-family: inherit;
+    background: var(--field-bg);
+    color: var(--ink);
+  }
+
+  /* Offset rather than inset: a ring drawn inside an accent fill only reaches
+     1.95:1 against it, while the same colour on the card is 7.37:1. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Fallback so an unclassed button is still recognisably a button. Explicit
+     .btn-* classes in the components layer override it without a specificity
+     fight. */
+  button {
+    padding: 12px 18px;
+    border-radius: 12px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  /* A button with a custom background gets no dimming from the UA, so the
+     submit button looked clickable for the whole upload. */
+  button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+}
+
+@layer components {
+  .shell {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 48px 20px 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    align-items: center;
+  }
+
+  .shell > * {
+    width: 100%;
+  }
+
+  /* A gap rather than a margin on the heading. BRAND_DESCRIPTION is optional,
+     and a heading margin-bottom applies whether or not anything follows it, so
+     an instance with no description still reserved 12px for the tagline it did
+     not have. gap only materialises between siblings, so one child means no
+     surplus space and the rhythm below the heading is purely .shell's 32px. */
+  .hero {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+  }
+
+  .hero h1 {
+    /* Fluid rather than a fixed 56px plus a breakpoint override. */
+    font-size: clamp(2rem, 1.25rem + 4vw, 3.5rem);
+    margin: 0;
+    letter-spacing: -1px;
+  }
+
+  .hero p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 18px;
+  }
+
+  /* The download and admin pages had no way back to the upload form. */
+  .home-link {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .home-link:hover {
+    text-decoration: underline;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--stroke);
+    border-radius: 18px;
+    padding: 28px;
+    box-shadow: var(--shadow);
+    text-align: center;
+  }
+
+  .card form {
+    text-align: left;
+  }
+
+  /* --- buttons -------------------------------------------------------------
+     Geometry and interaction here, colour in the -primary/-secondary/-danger
+     variants. Deliberately no margin: spacing is the layout container's job,
+     which is why the old blanket `button { margin-top: 18px }` needed five
+     separate margin-top: 0 overrides scattered downstream. */
+  .btn {
+    padding: 12px 18px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+  }
+
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--on-accent);
+  }
+
+  .btn-secondary {
+    background: var(--card);
+    border-color: var(--stroke-strong);
+    color: var(--ink);
+  }
+
+  /* The old secondary hover changed only the border tint, since background was
+     var(--card) in both states. */
+  .btn-secondary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--card), var(--ink) 6%);
+    border-color: var(--stroke-strong);
+    color: var(--ink);
+  }
+
+  /* Filled: for the one place the user has already been asked to confirm, so
+     the destructive action should be the visually dominant one. */
+  .btn-danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: var(--on-accent);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: var(--danger-hover);
+    border-color: var(--danger-hover);
+    color: var(--on-accent);
+  }
+
+  /* Outlined: for destructive actions that sit in a list, where a column of
+     filled red blocks would drown out the rest of the table while still
+     needing to read as destructive. */
+  .btn-danger-outline {
+    background: var(--card);
+    border-color: var(--stroke-strong);
+    color: var(--danger-ink);
+  }
+
+  .btn-danger-outline:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--card), var(--danger) 8%);
+    border-color: var(--danger);
+    color: var(--danger-ink);
+  }
+
+  .btn-sm {
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  .btn-block {
+    width: 100%;
+  }
+
+  /* --- upload form --------------------------------------------------------- */
+  /* 2px, not 1px: this is the primary affordance on the page, and a hairline
+     dashed border at the old --stroke was all but invisible in dark mode. */
+  .drop {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--stroke-strong);
+    border-radius: 20px;
+    padding: 32px;
+    cursor: pointer;
+    background: transparent;
+    text-align: center;
+  }
+
+  /* Visually hidden but still rendered, and therefore still focusable. The
+     previous display:none removed the file input from the tab order and the
+     accessibility tree entirely, so a keyboard-only user could not open the
+     file picker at all — the primary action of the whole page. */
+  .drop input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* The input itself is invisible, so focus has to show on its label. */
+  .drop:has(input:focus-visible) {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-color: var(--accent);
+  }
+
+  .drop.dragging {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--card), var(--accent) 6%);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  .token-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #upload-form[data-auth-required="false"] .token-row {
+    display: none;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    padding: 4px;
+    border: 1px solid var(--stroke-strong);
+    border-radius: 12px;
+    width: fit-content;
+  }
+
+  .mode-tab {
+    padding: 6px 18px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .mode-tab[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .mode-tab:hover {
+    background: color-mix(in srgb, var(--card), var(--accent) 10%);
+    color: var(--ink);
+  }
+
+  .mode-tab[aria-pressed="true"]:hover {
+    background: var(--accent-hover);
+    color: var(--on-accent);
+  }
+
+  #text-input {
+    width: 100%;
+    resize: vertical;
+    /* rows="8" in the markup is the fallback; this is the real floor. */
+    min-height: 160px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 14px;
+  }
+
+  #upload-form[data-mode="file"] .text-row {
+    display: none;
+  }
+
+  #upload-form[data-mode="text"] .drop {
+    display: none;
+  }
+
+  .form-actions {
+    margin-top: 18px;
+    display: flex;
+    gap: 12px;
+  }
+
+  /* --- result panel -------------------------------------------------------- */
+  .result {
+    margin-top: 20px;
+    padding: 16px;
+    border-radius: 14px;
+    background: var(--card);
+    border: 1px solid var(--stroke);
+  }
+
+  .result a:not(.btn) {
+    color: var(--link);
+    font-weight: 600;
+  }
+
+  .result-actions,
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .actions {
+    margin-top: 20px;
+  }
+
+  .link-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
   }
 
   .link-row {
-    flex-direction: column;
-    align-items: stretch;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  /* These are share links to copy, not fields to fill in, and they looked
+     identical to editable inputs. */
+  .link-row input[readonly] {
+    flex: 1;
+    min-width: 0;
+    background: color-mix(in srgb, var(--card), var(--ink) 4%);
+    border-style: dashed;
+    cursor: text;
   }
 
   .row-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    white-space: nowrap;
+    min-width: 64px;
+    text-align: right;
+  }
+
+  .hash-row input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  /* --- notes / CLI quickstart ---------------------------------------------- */
+  /* minmax(0, 1fr) rather than 1fr: a bare 1fr track cannot shrink below its
+     item's min-content, and the item holds an unwrapped curl command. That made
+     the track wider than the viewport on narrow screens and scrolled the whole
+     page sideways. */
+  .notes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    gap: 20px;
+    text-align: center;
+  }
+
+  .notes > div {
+    width: 100%;
+    max-width: 480px;
     min-width: 0;
+  }
+
+  .notes h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+
+  .notes .content-head {
     text-align: left;
+  }
+
+  .notes pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 16px;
+    border-radius: 12px;
+    overflow: auto;
+    text-align: left;
+  }
+
+  /* --- download page ------------------------------------------------------- */
+  .file-meta h2 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    overflow-wrap: anywhere;
+  }
+
+  .file-meta p {
+    margin: 6px 0;
+    color: var(--muted);
+  }
+
+  .code {
+    margin-top: 20px;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 16px;
+    border-radius: 12px;
+  }
+
+  .code span {
+    font-size: 12px;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--accent), white 20%);
+  }
+
+  .code pre {
+    margin: 8px 0 0;
+    overflow: auto;
+  }
+
+  .content-block {
+    margin-top: 20px;
+    text-align: left;
+  }
+
+  .content-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .content-block pre {
+    margin: 0;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 16px;
+    border-radius: 12px;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 13px;
+  }
+
+  .file-card {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--stroke);
+    text-align: center;
+  }
+
+  .file-card:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .file-card-error p {
+    margin: 6px 0;
+  }
+
+  .qr-block {
+    display: flex;
+    justify-content: center;
+    margin-top: 16px;
+  }
+
+  /* Hide the tile entirely if qr.js failed to load */
+  .qr-block:empty {
+    display: none;
+  }
+
+  /* Always black-on-white: inverted QR codes scan unreliably, so no
+     dark-mode treatment here */
+  .qr-block svg {
+    width: 148px;
+    height: 148px;
+    padding: 10px;
+    background: #fff;
+    border: 1px solid var(--stroke);
+    border-radius: 12px;
+  }
+
+  .upload-progress {
+    margin-top: 4px;
+    text-align: center;
+  }
+
+  .upload-progress progress {
+    width: 100%;
+    height: 10px;
+    accent-color: var(--accent);
+  }
+
+  .progress-text {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* --- admin -------------------------------------------------------------- */
+  .admin-card {
+    text-align: left;
+    overflow-x: auto;
+  }
+
+  .admin-login {
+    max-width: 360px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .admin-empty {
+    text-align: center;
+    color: var(--muted);
+  }
+
+  .admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  .admin-table th,
+  .admin-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--stroke);
+    text-align: left;
+  }
+
+  .admin-table th {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  .admin-table td form {
+    display: inline;
+  }
+
+  /* Long filenames would otherwise widen the table until .admin-card scrolls. */
+  .admin-table .file-name {
+    max-width: 22ch;
+    overflow-wrap: anywhere;
+  }
+
+  .admin-table a {
+    color: var(--link);
+    font-weight: 600;
+  }
+
+  .result h3,
+  .file-meta {
+    text-align: center;
+  }
+
+  @media (max-width: 720px) {
+    /* .notes is already single-column at every width, and re-declaring it here
+       as a bare 1fr would undo the minmax(0, 1fr) that keeps it from scrolling
+       the page sideways. */
+    .row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .link-row {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .row-label {
+      min-width: 0;
+      text-align: left;
+    }
+  }
+}
+
+@layer utilities {
+  .result.hidden,
+  .hidden {
+    display: none;
+  }
+
+  /* Available to assistive technology, absent from the visual layout. Used for
+     field labels the design shows only as placeholder text, which is not a
+     reliable accessible name and disappears the moment the user types. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* Semantic text colours live here, not in components, because they exist to
+     override whatever container styling a message happens to sit inside. As
+     plain single-class selectors in the components layer they lost to
+     `.file-meta p` (0,1,1 beats 0,1,0) — which is why .expiry's colour never
+     actually rendered on the download page, and why the delete-page warning
+     came out muted grey. Layer order settles it without a specificity hack. */
+  .expiry {
+    color: color-mix(in srgb, var(--link), var(--ink) 20%);
+    font-weight: 600;
+  }
+
+  /* Split by severity: these used to share one accent-blue .warn, so a failed
+     upload looked like a tip. --danger-ink is for something that went wrong;
+     --warn-ink is for something that was adjusted, such as an expiry clamped
+     to the server's maximum. */
+  .notice-danger {
+    color: var(--danger-ink);
+    font-weight: 600;
+  }
+
+  .notice-warn {
+    color: var(--warn-ink);
+    font-weight: 600;
   }
 }

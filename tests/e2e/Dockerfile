@@ -4,7 +4,7 @@
 #   docker run --rm dksend-e2e
 
 # ── Stage 1: build the server binary ────────────────────────────────────────
-FROM rust:1.96-alpine AS builder
+FROM rust:1.97-alpine AS builder
 
 RUN apk add --no-cache musl-dev build-base
 
@@ -12,12 +12,13 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY static ./static
+COPY templates ./templates
 COPY migrations ./migrations
 
 RUN cargo build
 
 # ── Stage 2: run Playwright tests ───────────────────────────────────────────
-FROM mcr.microsoft.com/playwright:v1.60.0-noble
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
 
 WORKDIR /app
 

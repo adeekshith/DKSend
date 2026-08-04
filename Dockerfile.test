@@ -2,7 +2,7 @@
 # Build and run:
 #   docker build -f Dockerfile.test -t dksend-unit-tests .
 #   docker run --rm dksend-unit-tests
-FROM rust:1.96-alpine
+FROM rust:1.97-alpine
 
 RUN apk add --no-cache musl-dev build-base nodejs
 
@@ -10,8 +10,10 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY static ./static
+COPY templates ./templates
 COPY migrations ./migrations
 COPY tests/cli.rs ./tests/cli.rs
+COPY tests/unit ./tests/unit
 
 RUN cargo test
-RUN node --test static/app.test.js
+RUN node --test "tests/unit/*.test.mjs"

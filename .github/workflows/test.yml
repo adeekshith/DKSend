@@ -29,10 +29,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: JS unit tests
-        run: node --test static/app.test.js
+        run: node --test "tests/unit/*.test.mjs"
 
       - name: Install Playwright
         working-directory: tests/e2e

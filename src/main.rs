@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -30,7 +30,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 struct AppState {
     pool: Pool<Sqlite>,
     config: AppConfig,
-    templates: Templates,
     upload_limiter: Option<RateLimiter>,
     lookup_limiter: Option<RateLimiter>,
 }
@@ -193,14 +192,6 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
 }
 
 #[derive(Clone)]
-struct Templates {
-    upload: String,
-    download: String,
-    error: String,
-    delete: String,
-    admin: String,
-}
-
 #[derive(Debug, Serialize)]
 struct UploadResponse {
     success: bool,
@@ -286,7 +277,6 @@ async fn main() {
 
 async fn run() -> Result<(), anyhow::Error> {
     let config = load_config()?;
-    let templates = load_templates().await?;
     let db_path = config.data_dir.join("uploads.db");
     eprintln!(
         "DKSend startup: data_dir={}, db_path={}, max_file_size={}, default_expiry_secs={}, max_expiry_secs={}, brand_title=\"{}\"",
@@ -323,7 +313,6 @@ async fn run() -> Result<(), anyhow::Error> {
         upload_limiter: RateLimiter::new(config.upload_rate_per_min),
         lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
         config,
-        templates,
     };
 
     let app = build_router(state.clone());
@@ -388,11 +377,17 @@ async fn shutdown_signal() {
 }
 
 
+// Asset URLs carry a content-derived version (see asset_version), so a cached
+// copy can never be stale: changed bytes mean a changed URL. Without this the
+// blanket no-store meant every page view re-fetched app.css, app.js, and the
+// 58 KB qr.js.
+const STATIC_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 fn build_router(state: AppState) -> Router {
     let static_service = get_service(ServeDir::new("static")).layer(
         SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store"),
+            header::HeaderValue::from_static(STATIC_CACHE_CONTROL),
         ),
     );
 
@@ -413,21 +408,14 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/{code}/{filename}", get(download_page_named))
         .with_state(state)
-}
-
-async fn load_templates() -> Result<Templates, anyhow::Error> {
-    let upload = fs::read_to_string("static/upload.html").await?;
-    let download = fs::read_to_string("static/download.html").await?;
-    let error = fs::read_to_string("static/error.html").await?;
-    let delete = fs::read_to_string("static/delete.html").await?;
-    let admin = fs::read_to_string("static/admin.html").await?;
-    Ok(Templates {
-        upload,
-        download,
-        error,
-        delete,
-        admin,
-    })
+        // Pages are never cacheable: they carry expiry countdowns and, on the
+        // delete-confirm and admin pages, a token. Inner layers have already
+        // set their own value by the time this runs, so if_not_present leaves
+        // the static assets and raw downloads alone.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        ))
 }
 
 fn load_config() -> Result<AppConfig, anyhow::Error> {
@@ -865,7 +853,7 @@ async fn handle_upload(
 async fn upload_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
     // Pass base_url so the CLI quickstart snippet shows the actual server URL
     let base_url = resolve_base_url(&state.config, &headers);
-    Html(render_upload_page(&state.templates, &state.config, &base_url))
+    Html(render_upload_page(&state.config, &base_url))
 }
 
 async fn healthz(State(state): State<AppState>) -> Response {
@@ -918,7 +906,6 @@ async fn download_page(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -935,7 +922,6 @@ async fn download_page(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -943,7 +929,6 @@ async fn download_page(
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -958,7 +943,6 @@ async fn download_page(
         return html_error(
             StatusCode::GONE,
             "This file does not exist or is no longer available.",
-            &state.templates,
             &state.config,
         );
     }
@@ -990,7 +974,6 @@ async fn download_page(
         &record,
         &base_url,
         inline,
-        &state.templates,
         &state.config,
     ))
     .into_response()
@@ -1203,7 +1186,6 @@ async fn delete_confirm_page(
             return html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist or was already deleted.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -1211,7 +1193,6 @@ async fn delete_confirm_page(
             return html_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Something went wrong while loading this file.",
-                &state.templates,
                 &state.config,
             )
         }
@@ -1224,11 +1205,10 @@ async fn delete_confirm_page(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid delete link.",
-            &state.templates,
             &state.config,
         );
     }
-    Html(render_delete_page(&record, &state.templates, &state.config)).into_response()
+    Html(render_delete_page(&record, &state.config)).into_response()
 }
 
 async fn delete_form_action(
@@ -1250,25 +1230,21 @@ async fn delete_form_action(
         Ok(DeleteOutcome::Deleted) => html_error(
             StatusCode::OK,
             "File deleted.",
-            &state.templates,
             &state.config,
         ),
         Ok(DeleteOutcome::NotFound) => html_error(
             StatusCode::NOT_FOUND,
             "This file does not exist or was already deleted.",
-            &state.templates,
             &state.config,
         ),
         Ok(DeleteOutcome::Forbidden) => html_error(
             StatusCode::FORBIDDEN,
             "Invalid delete token.",
-            &state.templates,
             &state.config,
         ),
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not delete the file.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1292,7 +1268,6 @@ fn admin_not_found(state: &AppState) -> Response {
     html_error(
         StatusCode::NOT_FOUND,
         "This page does not exist.",
-        &state.templates,
         &state.config,
     )
 }
@@ -1301,12 +1276,7 @@ async fn admin_page(State(state): State<AppState>) -> Response {
     if !admin_enabled(&state.config) {
         return admin_not_found(&state);
     }
-    Html(render_admin_page(
-        &state.templates,
-        &state.config,
-        render_admin_login(),
-    ))
-    .into_response()
+    Html(render_admin_login(&state.config)).into_response()
 }
 
 async fn admin_list_action(
@@ -1325,7 +1295,6 @@ async fn admin_list_action(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -1335,7 +1304,6 @@ async fn admin_list_action(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid admin token.",
-            &state.templates,
             &state.config,
         );
     }
@@ -1364,7 +1332,6 @@ async fn admin_delete_action(
             return rate_limited(html_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Try again shortly.",
-                &state.templates,
                 &state.config,
             ));
         }
@@ -1378,7 +1345,6 @@ async fn admin_delete_action(
         return html_error(
             StatusCode::FORBIDDEN,
             "Invalid admin token.",
-            &state.templates,
             &state.config,
         );
     }
@@ -1391,7 +1357,6 @@ async fn admin_delete_action(
                 return html_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Could not delete the file.",
-                    &state.templates,
                     &state.config,
                 );
             }
@@ -1411,14 +1376,12 @@ async fn admin_delete_action(
             html_error(
                 StatusCode::NOT_FOUND,
                 "This file does not exist or was already deleted.",
-                &state.templates,
                 &state.config,
             )
         }
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not delete the file.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1429,9 +1392,8 @@ async fn admin_delete_action(
 async fn admin_table_response(state: &AppState, token: &str) -> Response {
     match fetch_active_uploads(&state.pool).await {
         Ok(records) => {
-            let body = render_admin_list(&records, token);
             let mut response =
-                Html(render_admin_page(&state.templates, &state.config, body)).into_response();
+                Html(render_admin_list(&state.config, &records, token)).into_response();
             response.headers_mut().insert(
                 header::CACHE_CONTROL,
                 header::HeaderValue::from_static("no-store"),
@@ -1441,7 +1403,6 @@ async fn admin_table_response(state: &AppState, token: &str) -> Response {
         Err(_) => html_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not load uploads.",
-            &state.templates,
             &state.config,
         ),
     }
@@ -1575,15 +1536,12 @@ fn rate_limited(mut response: Response) -> Response {
     response
 }
 
-fn html_error(status: StatusCode, message: &str, templates: &Templates, config: &AppConfig) -> Response {
-    let title = escape_html(&config.brand_title);
-    let page = render_template(
-        &templates.error,
-        &[
-            ("{{title}}", title.clone()),
-            ("{{message}}", escape_html(message)),
-        ],
-    );
+fn html_error(status: StatusCode, message: &str, config: &AppConfig) -> Response {
+    let page = ErrorTemplate {
+        chrome: PageChrome::new(config),
+        message: message.to_string(),
+    }
+    .render_page();
     (status, Html(page)).into_response()
 }
 
@@ -1768,37 +1726,89 @@ fn format_duration(duration: ChronoDuration) -> String {
     format!("{} days", days)
 }
 
-fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+// Askama renders into a String and only fails on a formatter error, which for
+// a String sink cannot happen. Panicking here keeps every call site free of an
+// error path it could not act on anyway.
+trait RenderPage: askama::Template {
+    fn render_page(&self) -> String {
+        self.render()
+            .expect("compiled template must render into a String")
+    }
+}
+impl<T: askama::Template> RenderPage for T {}
+
+// Everything /static serves. Hashed together into one version, so a change to
+// any of them busts all three URLs — simpler than per-file versions and the
+// assets always ship as a set.
+const STATIC_ASSETS: [&str; 3] = ["app.css", "app.js", "qr.js"];
+
+// Static assets are served immutable for a year, so the version in their URL
+// must change whenever their bytes do. Deriving it from a content hash removes
+// the hand-maintained bump that let app.css sit at ?v=12 in five templates
+// while app.js had moved on to ?v=14.
+fn asset_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let mut hasher = Sha256::new();
+            for name in STATIC_ASSETS {
+                match std::fs::read(std::path::Path::new("static").join(name)) {
+                    Ok(bytes) => hasher.update(&bytes),
+                    // A missing asset is already a 404 at request time; hash
+                    // the name so startup still succeeds with a stable value.
+                    Err(_) => hasher.update(name.as_bytes()),
+                }
+            }
+            let mut hex = String::with_capacity(12);
+            for byte in hasher.finalize().iter().take(6) {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            hex
+        })
+        .as_str()
 }
 
-fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
-    let mut output = template.to_string();
-    for (key, value) in replacements {
-        output = output.replace(key, value);
+// Page-level chrome that every template inherits through base.html. Grouping it
+// means new head content is one struct field rather than one per page struct.
+struct PageChrome {
+    title: String,
+    // BRAND_DESCRIPTION lives here rather than on each page struct: it used to
+    // be passed to the upload page by a render function whose template had no
+    // slot for it, so the configured tagline silently never appeared. Rendering
+    // it from the shared layout means one place decides, for every page.
+    description: String,
+    asset_v: &'static str,
+}
+
+impl PageChrome {
+    fn new(config: &AppConfig) -> Self {
+        Self {
+            title: config.brand_title.clone(),
+            description: config.brand_description.clone(),
+            asset_v: asset_version(),
+        }
     }
-    output
 }
 
 // The expiry dropdown mirrors server config: the empty value means "let the
 // server apply DEFAULT_EXPIRY", followed by standard choices that fit within
 // the configured bounds.
-fn expiry_options_html(config: &AppConfig) -> String {
+struct ExpiryChoice {
+    value: String,
+    label: String,
+}
+
+fn expiry_choices(config: &AppConfig) -> Vec<ExpiryChoice> {
     let candidates = [
         Duration::from_secs(60 * 30),
         Duration::from_secs(60 * 60),
         Duration::from_secs(60 * 60 * 24),
         Duration::from_secs(60 * 60 * 24 * 7),
     ];
-    let mut html = format!(
-        r#"<option value="">{} (default)</option>"#,
-        duration_short(config.default_expiry)
-    );
+    let mut choices = vec![ExpiryChoice {
+        value: String::new(),
+        label: format!("{} (default)", duration_short(config.default_expiry)),
+    }];
     for candidate in candidates {
         if candidate < config.min_expiry
             || candidate > config.max_expiry
@@ -1807,90 +1817,135 @@ fn expiry_options_html(config: &AppConfig) -> String {
             continue;
         }
         let label = duration_short(candidate);
-        html.push_str(&format!(r#"<option value="{label}">{label}</option>"#));
+        choices.push(ExpiryChoice {
+            value: label.clone(),
+            label,
+        });
     }
-    html
+    choices
 }
 
-fn render_upload_page(templates: &Templates, config: &AppConfig, base_url: &str) -> String {
-    let title = escape_html(&config.brand_title);
-    let description = escape_html(&config.brand_description);
+#[derive(askama::Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    chrome: PageChrome,
+    message: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "upload.html")]
+struct UploadTemplate {
+    chrome: PageChrome,
+    auth_required: bool,
+    auth_snippet: String,
+    max_file_size: u64,
+    site_url: String,
+    expiry_choices: Vec<ExpiryChoice>,
+}
+
+struct AdminRow {
+    code: String,
+    filename: String,
+    size: String,
+    created: String,
+    expires: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin.html")]
+struct AdminTemplate {
+    chrome: PageChrome,
+    // Echoed into each row's delete form, so it is carried once per page
+    // rather than per row.
+    token: String,
+    // None renders the login form; Some renders the upload table, which may
+    // legitimately be empty.
+    uploads: Option<Vec<AdminRow>>,
+}
+
+#[derive(askama::Template)]
+#[template(path = "delete.html")]
+struct DeleteTemplate {
+    chrome: PageChrome,
+    filename: String,
+    size: String,
+    code: String,
+    token: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "download.html")]
+struct DownloadTemplate {
+    chrome: PageChrome,
+    filename: String,
+    size: String,
+    created_at: String,
+    expires_in: String,
+    download_url: String,
+    download_page_url: String,
+    sha256_hex: String,
+    inline_text: Option<String>,
+}
+
+fn render_upload_page(config: &AppConfig, base_url: &str) -> String {
     let auth_required = config.upload_token.is_some();
-    // The page only learns whether a token is needed, never the token itself.
-    // The quickstart shows the proxy-safe header (see upload_authorized).
-    let auth_snippet = if auth_required {
-        escape_html(" -H 'X-Upload-Token: <token>'")
-    } else {
-        String::new()
-    };
-    // site_url is injected so the CLI quickstart shows the actual server URL
-    render_template(
-        &templates.upload,
-        &[
-            ("{{title}}", title),
-            ("{{description}}", description),
-            ("{{site_url}}", base_url.to_string()),
-            ("{{auth_required}}", auth_required.to_string()),
-            ("{{auth_snippet}}", auth_snippet),
-            ("{{max_file_size}}", config.max_file_size.to_string()),
-            ("{{expiry_options}}", expiry_options_html(config)),
-        ],
-    )
-}
-
-fn render_admin_page(templates: &Templates, config: &AppConfig, body: String) -> String {
-    render_template(
-        &templates.admin,
-        &[
-            ("{{title}}", escape_html(&config.brand_title)),
-            ("{{admin_body}}", body),
-        ],
-    )
-}
-
-fn render_admin_login() -> String {
-    r#"<form method="post" action="/admin" class="admin-login">
-      <label>Admin token (UPLOAD_TOKEN)
-        <input type="password" name="token" autocomplete="off" required>
-      </label>
-      <button type="submit">View uploads</button>
-    </form>"#
-        .to_string()
-}
-
-fn render_admin_list(records: &[UploadRecord], token: &str) -> String {
-    if records.is_empty() {
-        return r#"<p class="admin-empty">No active uploads.</p>"#.to_string();
+    UploadTemplate {
+        chrome: PageChrome::new(config),
+        auth_required,
+        // The page only learns whether a token is needed, never the token
+        // itself. The quickstart shows the proxy-safe header (see
+        // upload_authorized). Askama escapes it on the way out.
+        auth_snippet: if auth_required {
+            " -H 'X-Upload-Token: <token>'".to_string()
+        } else {
+            String::new()
+        },
+        max_file_size: config.max_file_size,
+        // site_url is injected so the CLI quickstart shows the actual server URL
+        site_url: base_url.to_string(),
+        expiry_choices: expiry_choices(config),
     }
+    .render_page()
+}
+
+fn render_admin_login(config: &AppConfig) -> String {
+    AdminTemplate {
+        chrome: PageChrome::new(config),
+        token: String::new(),
+        uploads: None,
+    }
+    .render_page()
+}
+
+fn render_admin_list(config: &AppConfig, records: &[UploadRecord], token: &str) -> String {
     let now = Utc::now();
-    let escaped_token = escape_html(token);
-    let mut rows = String::new();
-    for record in records {
-        let code = &record.code; // generated charset, safe to embed
-        let filename = escape_html(&record.original_filename);
-        let size = human_size(record.size_bytes);
-        let created = record.created_at.format("%Y-%m-%d %H:%M").to_string();
-        let expires = format_duration(record.expires_at - now);
-        rows.push_str(&format!(
-            r#"<tr><td><a href="/{code}">{code}</a></td><td class="file-name">{filename}</td><td>{size}</td><td>{created}</td><td>{expires}</td><td><form method="post" action="/admin/delete/{code}"><input type="hidden" name="token" value="{escaped_token}"><button type="submit">Delete</button></form></td></tr>"#
-        ));
+    let uploads = records
+        .iter()
+        .map(|record| AdminRow {
+            code: record.code.clone(),
+            filename: record.original_filename.clone(),
+            size: human_size(record.size_bytes),
+            created: record.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            expires: format_duration(record.expires_at - now),
+        })
+        .collect();
+    AdminTemplate {
+        chrome: PageChrome::new(config),
+        token: token.to_string(),
+        uploads: Some(uploads),
     }
-    format!(
-        r#"<table class="admin-table"><thead><tr><th>Code</th><th>Filename</th><th>Size</th><th>Uploaded (UTC)</th><th>Expires in</th><th></th></tr></thead><tbody>{rows}</tbody></table>"#
-    )
+    .render_page()
 }
 
-fn render_delete_page(record: &UploadRecord, templates: &Templates, config: &AppConfig) -> String {
-    render_template(
-        &templates.delete,
-        &[
-            ("{{title}}", escape_html(&config.brand_title)),
-            ("{{filename}}", escape_html(&record.original_filename)),
-            ("{{size}}", human_size(record.size_bytes)),
-            ("{{code}}", record.code.clone()),
-            ("{{token}}", escape_html(&record.delete_token)),
-        ],
-    )
+fn render_delete_page(record: &UploadRecord, config: &AppConfig) -> String {
+    DeleteTemplate {
+        chrome: PageChrome::new(config),
+        filename: record.original_filename.clone(),
+        size: human_size(record.size_bytes),
+        code: record.code.clone(),
+        token: record.delete_token.clone(),
+    }
+    .render_page()
 }
 
 // Cap on how much of an upload we read to show inline on the download page.
@@ -1908,54 +1963,24 @@ fn render_download_page(
     record: &UploadRecord,
     base_url: &str,
     inline: Option<&str>,
-    templates: &Templates,
     config: &AppConfig,
 ) -> String {
-    let title = escape_html(&config.brand_title);
-    let description = escape_html(&config.brand_description);
-    let filename = escape_html(&record.original_filename);
     let encoded = urlencoding::encode(&record.original_filename);
-    let download_url = format!("{base_url}/raw/{}/{}", record.code, encoded);
-    let download_page_url = format!("{base_url}/{}", record.code);
-    let expires_in = format_duration(record.expires_at - Utc::now());
-    let created_at = record.created_at.to_rfc3339();
-    let size = human_size(record.size_bytes);
-    let sha256_block = if record.sha256_hex.is_empty() {
-        String::new()
-    } else {
-        let hex = &record.sha256_hex;
-        format!(
-            r#"<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="{hex}"><button type="button" data-copy="{hex}">Copy</button></div>"#
-        )
-    };
-    // The text is escaped into a <pre>; the copy button reads it back from the
-    // element via data-copy-from, so the content isn't duplicated into an attr.
-    // Note: r##"..."## — the markup contains `"#` (data-copy-from="#...),
-    // which would close a plain r#"..."# raw string early.
-    let content_block = match inline {
-        Some(text) => format!(
-            r##"<div class="content-block"><div class="content-head"><span class="row-label">Contents</span><button type="button" data-copy-from="#file-contents">Copy</button></div><pre id="file-contents">{}</pre></div>"##,
-            escape_html(text)
-        ),
-        None => String::new(),
-    };
-
-    render_template(
-        &templates.download,
-        &[
-            ("{{title}}", title),
-            ("{{description}}", description),
-            ("{{filename}}", filename),
-            ("{{size}}", size),
-            ("{{created_at}}", created_at),
-            ("{{expires_in}}", expires_in),
-            ("{{download_url}}", download_url.clone()),
-            ("{{download_page_url}}", download_page_url),
-            ("{{curl_url}}", download_url),
-            ("{{sha256_block}}", sha256_block),
-            ("{{content_block}}", content_block),
-        ],
-    )
+    DownloadTemplate {
+        chrome: PageChrome::new(config),
+        filename: record.original_filename.clone(),
+        size: human_size(record.size_bytes),
+        created_at: record.created_at.to_rfc3339(),
+        expires_in: format_duration(record.expires_at - Utc::now()),
+        download_url: format!("{base_url}/raw/{}/{}", record.code, encoded),
+        download_page_url: format!("{base_url}/{}", record.code),
+        sha256_hex: record.sha256_hex.clone(),
+        // The template escapes the text into a <pre>; the copy button reads it
+        // back from the element via data-copy-from, so the content is never
+        // duplicated into an attribute.
+        inline_text: inline.map(str::to_string),
+    }
+    .render_page()
 }
 
 #[cfg(test)]
@@ -1980,14 +2005,12 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-        let templates = load_templates().await.unwrap();
         let config = test_config(data_dir);
         AppState {
             pool,
             upload_limiter: RateLimiter::new(config.upload_rate_per_min),
             lookup_limiter: RateLimiter::new(config.lookup_rate_per_min),
             config,
-            templates,
         }
     }
 
@@ -2141,15 +2164,8 @@ mod tests {
 
     #[test]
     fn upload_page_file_input_not_required() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let config = test_config(PathBuf::from("./data"));
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(
             !html.contains(r#"type="file" required"#) && !html.contains(r#"type="file"  required"#),
             "file input must not have the required attribute (breaks drag-and-drop)"
@@ -2358,8 +2374,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(tmp.path()).await;
         let html = download_page_html(&state, "xss.txt", b"<script>alert(1)</script>".to_vec()).await;
-        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "must be escaped");
-        assert!(!html.contains("<script>alert(1)</script>"), "raw tag must never appear");
+        // Assert the security property, not one particular entity spelling:
+        // the escaper emits numeric entities (&#60;) rather than named ones.
+        // Scoped to the injected payload, since the page has its own <script>
+        // tags for qr.js and app.js.
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "raw payload must never appear"
+        );
+        assert!(html.contains("alert(1)"), "the text itself should still be shown");
+        assert!(html.contains("content-block"), "rendered inline as text");
     }
 
     #[tokio::test]
@@ -3036,6 +3060,291 @@ mod tests {
         assert!(html.contains(&format!(r#"action="/admin/delete/{code_a}""#)));
     }
 
+    // The static dir is served wholesale, so anything dropped in it ships to
+    // production and is publicly fetchable. Test code must not live there.
+    #[tokio::test]
+    async fn static_dir_serves_no_test_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(
+                Request::get("/static/app.test.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the JS unit test must not be reachable over HTTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_dir_still_serves_page_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/static/app.css").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn static_assets_are_cacheable_forever() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/static/app.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            STATIC_CACHE_CONTROL,
+            "versioned assets must be cacheable, or every page view refetches them"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_are_never_cacheable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app(test_state(tmp.path()).await);
+
+        let response = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "pages carry expiry countdowns and tokens"
+        );
+    }
+
+    // The blanket outer layer must not clobber the routes that set their own
+    // Cache-Control, or raw downloads become uncacheable-by-accident.
+    #[tokio::test]
+    async fn raw_download_keeps_its_own_cache_control() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let (code, _) = upload_for_delete(&state).await;
+
+        let response = test_app(state)
+            .oneshot(
+                Request::get(format!("/raw/{code}/victim.txt"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, max-age=0"
+        );
+    }
+
+    // One version for all three assets, so a page can never mix a fresh
+    // stylesheet with a stale script.
+    #[tokio::test]
+    async fn every_asset_url_shares_one_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let html = render_upload_page(&state.config, "https://example.com");
+
+        let versions: std::collections::HashSet<&str> = html
+            .split("/static/")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .filter_map(|url| url.split("?v=").nth(1))
+            .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "asset URLs drifted apart: {versions:?}"
+        );
+        let version = versions.into_iter().next().unwrap();
+        assert_eq!(version, asset_version());
+        assert!(!version.is_empty(), "assets must carry a version");
+    }
+
+    // render_upload_page passed a description to a template that had no slot
+    // for it, so the documented tagline silently never rendered.
+    #[test]
+    fn upload_page_shows_the_brand_description() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.brand_description = "Fast, friendly file drops.".to_string();
+        let html = render_upload_page(&config, "https://example.com");
+        assert!(
+            html.contains("Fast, friendly file drops."),
+            "BRAND_DESCRIPTION must appear on the landing page"
+        );
+    }
+
+    // Returns the markup between <header class="hero"> and </header>.
+    fn hero_of(html: &str) -> String {
+        let start = html
+            .find(r#"<header class="hero">"#)
+            .expect("every page has a hero");
+        let end = html[start..].find("</header>").expect("hero must close") + start;
+        html[start..end].to_string()
+    }
+
+    // BRAND_DESCRIPTION is optional. Unset, it must leave no trace: no element,
+    // empty or otherwise. The layout half of this — that no space is reserved
+    // either — is asserted in tests/e2e/no-description.spec.ts, which needs a
+    // real browser to measure.
+    #[test]
+    fn upload_page_omits_the_description_when_unset() {
+        let mut config = test_config(PathBuf::from("./data"));
+        config.brand_description = String::new();
+        let hero = hero_of(&render_upload_page(&config, "https://example.com"));
+        assert!(
+            !hero.contains("<p"),
+            "an unset description must not emit a paragraph at all, got: {hero}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_page_omits_the_description_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.brand_description = String::new();
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "quiet.txt".to_string(),
+            stored_path: String::new(),
+            size_bytes: 12,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let hero = hero_of(&render_download_page(
+            &record,
+            "https://example.com",
+            None,
+            &state.config,
+        ));
+        assert!(
+            !hero.contains("<p"),
+            "the download hero must not emit a paragraph either, got: {hero}"
+        );
+    }
+
+    // The whole point of the space fix: nothing about the heading's own box
+    // should depend on whether a description follows it.
+    #[test]
+    fn the_heading_carries_no_bottom_margin() {
+        let css = std::fs::read_to_string("static/app.css").unwrap();
+        let hero_rule = css
+            .split(".hero h1 {")
+            .nth(1)
+            .expect(".hero h1 rule must exist")
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            hero_rule.contains("margin: 0;"),
+            "a bottom margin here would reserve space for an absent description: {hero_rule}"
+        );
+        let hero_container = css
+            .split("\n  .hero {")
+            .nth(1)
+            .expect(".hero rule must exist")
+            .split('}')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(
+            hero_container.contains("gap:"),
+            "spacing between hero children must come from a gap: {hero_container}"
+        );
+    }
+
+    #[test]
+    fn every_page_carries_a_favicon_and_theme_colour() {
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&config, "https://example.com");
+        // Without a favicon link, /favicon.ico falls through to the {code}
+        // route and renders the 404 page.
+        assert!(html.contains(r#"rel="icon""#), "needs a favicon");
+        assert!(
+            html.contains("prefers-color-scheme: light") && html.contains("prefers-color-scheme: dark"),
+            "needs a theme-color for both schemes"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_page_has_link_preview_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "report.pdf".to_string(),
+            stored_path: String::new(),
+            size_bytes: 2048,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(3),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(html.contains(r#"property="og:title""#));
+        assert!(html.contains(r#"property="og:url""#));
+        assert!(html.contains(r#"name="description""#));
+        assert!(html.contains("report.pdf"));
+    }
+
+    // og:* values ride in attributes, so a quote in a filename would otherwise
+    // end the attribute early.
+    #[tokio::test]
+    async fn link_preview_metadata_escapes_the_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: r#"a" onmouseover="x"#.to_string(),
+            stored_path: String::new(),
+            size_bytes: 10,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(
+            !html.contains(r#"onmouseover="x""#),
+            "a bare quote must not break out of the content attribute"
+        );
+    }
+
+    #[test]
+    fn every_page_links_home() {
+        let config = test_config(PathBuf::from("./data"));
+        let html = render_upload_page(&config, "https://example.com");
+        assert!(
+            html.contains(r#"class="home-link" href="/""#),
+            "the download and admin pages need a way back to the form"
+        );
+    }
+
+    #[test]
+    fn asset_version_tracks_asset_contents() {
+        // Same inputs, same value: the version is a pure function of the
+        // bytes, not a per-boot random or a hand-maintained counter.
+        assert_eq!(asset_version(), asset_version());
+        assert_eq!(asset_version().len(), 12);
+        assert!(asset_version().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
     #[tokio::test]
     async fn admin_list_excludes_expired_uploads() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3092,8 +3401,44 @@ mod tests {
             .unwrap();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(html.contains("&lt;img src=x&gt;.txt"));
-        assert!(!html.contains("<img src=x>"));
+        // The escaper emits numeric entities, so assert the security property
+        // rather than a particular entity spelling.
+        assert!(!html.contains("<img src=x>"), "raw markup must never appear");
+        assert!(
+            html.contains("img src=x") && html.contains(".txt"),
+            "the filename text should still be visible: {html}"
+        );
+    }
+
+    // The admin token used to be interpolated per row; it now lives once on
+    // the template and is echoed into each row's form by the loop.
+    #[tokio::test]
+    async fn admin_list_gives_every_row_a_token_bearing_delete_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(tmp.path()).await;
+        state.config.upload_token = None;
+        let (code_a, _) = upload_for_delete(&state).await;
+        let (code_b, _) = upload_for_delete(&state).await;
+        state.config.upload_token = Some("s3cret".to_string());
+
+        let response = test_app(state)
+            .oneshot(admin_post("/admin", "s3cret"))
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+
+        for code in [&code_a, &code_b] {
+            assert!(
+                html.contains(&format!(r#"action="/admin/delete/{code}""#)),
+                "row {code} needs its own delete form"
+            );
+        }
+        assert_eq!(
+            html.matches(r#"name="token" value="s3cret""#).count(),
+            2,
+            "each row's form must carry the admin token"
+        );
     }
 
     #[tokio::test]
@@ -3513,16 +3858,9 @@ mod tests {
 
     #[test]
     fn upload_page_shows_token_field_when_auth_enabled() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let mut config = test_config(PathBuf::from("./data"));
         config.upload_token = Some("s3cret".to_string());
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="true""#));
         assert!(html.contains("X-Upload-Token"), "quickstart should show the auth header");
         assert!(!html.contains("s3cret"), "the token itself must never reach the page");
@@ -3530,32 +3868,25 @@ mod tests {
 
     #[test]
     fn upload_page_hides_token_field_when_open() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let config = test_config(PathBuf::from("./data"));
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-auth-required="false""#));
         assert!(!html.contains("X-Upload-Token"));
     }
 
     #[test]
     fn upload_page_embeds_max_file_size() {
-        let templates = Templates {
-            upload: std::fs::read_to_string("static/upload.html").unwrap(),
-            download: String::new(),
-            error: String::new(),
-            delete: String::new(),
-            admin: String::new(),
-        };
         let mut config = test_config(PathBuf::from("./data"));
         config.max_file_size = 1234;
-        let html = render_upload_page(&templates, &config, "https://example.com");
+        let html = render_upload_page(&config, "https://example.com");
         assert!(html.contains(r#"data-max-file-size="1234""#));
+    }
+
+    fn choice_values(config: &AppConfig) -> Vec<String> {
+        expiry_choices(config)
+            .into_iter()
+            .map(|choice| choice.value)
+            .collect()
     }
 
     #[test]
@@ -3563,23 +3894,57 @@ mod tests {
         let mut config = test_config(PathBuf::from("./data"));
         config.default_expiry = Duration::from_secs(3600);
         config.max_expiry = Duration::from_secs(3600);
-        let html = expiry_options_html(&config);
-        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
-        assert!(html.contains(r#"value="30m""#));
-        assert!(!html.contains("1d"), "options above max_expiry must be dropped: {html}");
-        assert!(!html.contains("7d"));
-        assert!(!html.contains(r#"value="1h""#), "default must not be duplicated");
+        let choices = expiry_choices(&config);
+        assert_eq!(choices[0].value, "");
+        assert_eq!(choices[0].label, "1h (default)");
+        let values = choice_values(&config);
+        assert!(values.contains(&"30m".to_string()));
+        assert!(
+            !values.contains(&"1d".to_string()),
+            "options above max_expiry must be dropped: {values:?}"
+        );
+        assert!(!values.contains(&"7d".to_string()));
+        assert!(
+            !values.contains(&"1h".to_string()),
+            "default must not be duplicated"
+        );
     }
 
     #[test]
     fn expiry_options_skip_default_duplicate() {
         // test_config: default 1h, bounds 5m..1d
         let config = test_config(PathBuf::from("./data"));
-        let html = expiry_options_html(&config);
-        assert!(html.contains(r#"<option value="">1h (default)</option>"#));
-        assert!(html.contains(r#"value="30m""#));
-        assert!(html.contains(r#"value="1d""#));
-        assert!(!html.contains(r#"value="1h""#));
-        assert!(!html.contains("7d"));
+        let choices = expiry_choices(&config);
+        assert_eq!(choices[0].value, "");
+        assert_eq!(choices[0].label, "1h (default)");
+        let values = choice_values(&config);
+        assert!(values.contains(&"30m".to_string()));
+        assert!(values.contains(&"1d".to_string()));
+        assert!(!values.contains(&"1h".to_string()));
+        assert!(!values.contains(&"7d".to_string()));
+    }
+
+    // The old String::replace renderer substituted placeholders sequentially
+    // over the whole document, so a value could be re-substituted by a later
+    // pass. Compiled templates interpolate once, per slot.
+    #[tokio::test]
+    async fn placeholder_shaped_filename_is_not_re_substituted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(tmp.path()).await;
+        let record = UploadRecord {
+            code: "abc".to_string(),
+            original_filename: "{{download_url}}".to_string(),
+            stored_path: String::new(),
+            size_bytes: 3,
+            sha256_hex: String::new(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+            delete_token: String::new(),
+        };
+        let html = render_download_page(&record, "https://example.com", None, &state.config);
+        assert!(
+            html.contains("{{download_url}}"),
+            "the filename must render literally, not as the URL it names"
+        );
     }
 }

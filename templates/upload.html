@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+      <section class="card">
+        <form id="upload-form" data-auth-required="{{ auth_required }}" data-max-file-size="{{ max_file_size }}" data-mode="file">
+          {#- A pair of toggle buttons, not a tablist: aria-selected is not valid
+              on a role-less button, there are no tabpanels for tabs to control,
+              and a real tablist would owe the user arrow-key navigation. -#}
+          <div class="mode-toggle" role="group" aria-label="What to share">
+            <button type="button" class="mode-tab" data-mode-set="file" aria-pressed="true">File</button>
+            <button type="button" class="mode-tab" data-mode-set="text" aria-pressed="false">Text</button>
+          </div>
+          <label class="drop" id="drop-zone">
+            <input type="file" id="file" multiple>
+            <span>Drag &amp; drop or click to choose a file</span>
+          </label>
+          <div class="text-row">
+            {#- A placeholder is not a reliable accessible name and vanishes on
+                the first keystroke, so the field carries a real label. -#}
+            <label for="text-input" class="sr-only">Text to share</label>
+            <textarea id="text-input" rows="8" placeholder="Paste or type text to share"></textarea>
+          </div>
+          <div class="row">
+            <label>
+              Filename override
+              <input type="text" id="filename" placeholder="Leave blank to keep original">
+            </label>
+            <label>
+              Expiry
+              <select id="expiry">
+                {#- Rendered from the server's DEFAULT_EXPIRY/MIN_EXPIRY/MAX_EXPIRY -#}
+                {% for choice in expiry_choices %}<option value="{{ choice.value }}">{{ choice.label }}</option>{% endfor %}
+              </select>
+            </label>
+          </div>
+          <div class="row token-row">
+            <label>
+              Upload token
+              <input type="password" id="token" autocomplete="off" placeholder="Required on this server">
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Upload</button>
+          </div>
+        </form>
+        <div id="result" class="result hidden" data-result></div>
+      </section>
+      <section class="notes">
+        <div>
+          <div class="content-head">
+            <h2>CLI quickstart</h2>
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-from="#cli-quickstart">Copy</button>
+          </div>
+          {#- site_url is the actual request origin, resolved server-side -#}
+          <pre id="cli-quickstart">curl{{ auth_snippet }} --upload-file ./hello.txt {{ site_url }}</pre>
+        </div>
+      </section>
+{% endblock %}
+
+{% block scripts %}
+    <script src="/static/qr.js?v={{ chrome.asset_v }}" defer></script>
+    <script src="/static/app.js?v={{ chrome.asset_v }}" defer></script>
+{% endblock %}

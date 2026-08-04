@@ -28,6 +28,20 @@ const copyText = async (text) => {
   }
 };
 
+// Every value interpolated into an innerHTML template goes through this. The
+// filename comes from the uploader's own ?name= parameter and is NOT escaped
+// server-side (unlike the download page, which renders through a template that
+// escapes automatically), so `?name=<img src=x onerror=...>` used to execute.
+// Only the uploader can reach it, but it also meant any filename containing
+// &, <, or " rendered wrong.
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 const setButtonState = (button, ok) => {
   const original = button.dataset.label || button.textContent;
   button.dataset.label = original;
@@ -58,6 +72,15 @@ const qrHosts = document.querySelectorAll?.('[data-qr]') || [];
 for (const el of qrHosts) {
   el.innerHTML = qrSvgTag(el.getAttribute('data-qr'));
 }
+
+// Clicking a readonly share link selects the whole value, so keyboard copy
+// works without dragging across a long URL.
+document.addEventListener('focusin', (event) => {
+  const field = event.target;
+  if (field?.matches?.('input[readonly]')) {
+    field.select?.();
+  }
+});
 
 document.addEventListener('click', async (event) => {
   // data-copy carries the text directly; data-copy-from="#id" copies that
@@ -96,7 +119,7 @@ if (uploadForm) {
   const setMode = (mode) => {
     uploadForm.dataset.mode = mode;
     for (const tab of modeTabs) {
-      tab.setAttribute('aria-selected', tab.getAttribute('data-mode-set') === mode ? 'true' : 'false');
+      tab.setAttribute('aria-pressed', tab.getAttribute('data-mode-set') === mode ? 'true' : 'false');
     }
   };
   for (const tab of modeTabs) {
@@ -210,6 +233,11 @@ if (uploadForm) {
       return;
     }
     event.preventDefault();
+    // Pasting a file while the form is in text mode used to select it and
+    // update the (hidden) drop label, then submit ignored it and shared the
+    // textarea instead — the paste silently did nothing. Switch modes so the
+    // selection is the thing that actually gets uploaded.
+    setMode('file');
     setSelectedFiles(
       Array.from(files).map((file) => ({ file, name: pastedFilename(file.type) })),
     );
@@ -279,8 +307,8 @@ if (uploadForm) {
   const renderProgressHtml = (label, loaded, total) => {
     const pct = total ? Math.floor((loaded / total) * 100) : 0;
     return `
-      <div class="upload-progress">
-        <p>Uploading <strong>${label}</strong>…</p>
+      <div class="upload-progress" role="status" aria-live="polite">
+        <p>Uploading <strong>${escapeHtml(label)}</strong>…</p>
         <progress max="${total}" value="${loaded}"></progress>
         <span class="progress-text">${pct}% · ${humanSize(loaded)} / ${humanSize(total)}</span>
       </div>
@@ -288,31 +316,32 @@ if (uploadForm) {
   };
 
   const renderResultCard = (data) => {
-    const warning = data.warning ? `<p class="warn">${data.warning}</p>` : '';
+    // The server-side expiry clamp is an adjustment, not a failure.
+    const warning = data.warning ? `<p class="notice-warn">${escapeHtml(data.warning)}</p>` : '';
     const hashRow = data.sha256
-      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${data.sha256}"><button type="button" data-copy="${data.sha256}">Copy</button></div>`
+      ? `<div class="link-row hash-row"><span class="row-label">SHA-256</span><input type="text" readonly value="${escapeHtml(data.sha256)}"><button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.sha256)}">Copy</button></div>`
       : '';
     const deleteRow = data.delete_url
-      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${data.delete_url}"><button type="button" data-copy="${data.delete_url}">Copy</button></div>`
+      ? `<div class="link-row"><span class="row-label">Delete</span><input type="text" readonly value="${escapeHtml(data.delete_url)}"><button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.delete_url)}">Copy</button></div>`
       : '';
     return `
       <div class="file-card">
-        <p><strong>${data.filename}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
+        <p><strong>${escapeHtml(data.filename)}</strong> (${Math.round(data.size_bytes / 1024)} KB)</p>
         ${warning}
         <div class="result-actions">
-          <a href="${data.download_page_url}" target="_blank" rel="noopener">Open download page</a>
+          <a class="btn btn-secondary" href="${escapeHtml(data.download_page_url)}" target="_blank" rel="noopener">Open download page</a>
         </div>
-        <div class="qr-block">${qrSvgTag(data.download_page_url)}</div>
+        <div class="qr-block" role="img" aria-label="QR code for this share link">${qrSvgTag(data.download_page_url)}</div>
         <div class="link-list">
           <div class="link-row">
             <span class="row-label">Page</span>
-            <input type="text" readonly value="${data.download_page_url}">
-            <button type="button" data-copy="${data.download_page_url}">Copy</button>
+            <input type="text" readonly value="${escapeHtml(data.download_page_url)}">
+            <button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.download_page_url)}">Copy</button>
           </div>
           <div class="link-row">
             <span class="row-label">Raw</span>
-            <input type="text" readonly value="${data.raw_download_url}">
-            <button type="button" data-copy="${data.raw_download_url}">Copy</button>
+            <input type="text" readonly value="${escapeHtml(data.raw_download_url)}">
+            <button type="button" class="btn btn-secondary" data-copy="${escapeHtml(data.raw_download_url)}">Copy</button>
           </div>
           ${hashRow}
           ${deleteRow}
@@ -323,8 +352,8 @@ if (uploadForm) {
 
   const renderErrorCard = (name, message) => `
     <div class="file-card file-card-error">
-      <p><strong>${name}</strong></p>
-      <p class="warn">${message}</p>
+      <p><strong>${escapeHtml(name)}</strong></p>
+      <p class="notice-danger">${escapeHtml(message)}</p>
     </div>
   `;
 
@@ -332,7 +361,7 @@ if (uploadForm) {
   const renderSummaryHtml = () => `
     <h3>Uploaded</h3>
     <div class="result-actions">
-      <button type="button" data-reset>Upload another file</button>
+      <button type="button" class="btn btn-secondary" data-reset>Upload another file</button>
     </div>
   `;
 
@@ -390,15 +419,25 @@ if (uploadForm) {
       if (result) {
         result.innerHTML = renderProgressHtml(label, 0, file.size) + cardsHtml;
       }
+      // Rewriting result.innerHTML re-parses every already-finished card,
+      // rebuilding their QR <svg>s and inputs and dropping any selection the
+      // user had in them. xhr fires progress far more often than the display
+      // changes, so only redraw when the percentage the user sees actually
+      // moves: for a large upload that is at most 101 redraws instead of one
+      // per network chunk.
+      let lastPct = -1;
       try {
         const data = await uploadFile(file, {
           name,
           expires: expirySelect?.value || '',
           token,
           onProgress: (loaded, total) => {
-            if (result) {
-              result.innerHTML = renderProgressHtml(label, loaded, total) + cardsHtml;
+            const pct = total ? Math.floor((loaded / total) * 100) : 0;
+            if (!result || pct === lastPct) {
+              return;
             }
+            lastPct = pct;
+            result.innerHTML = renderProgressHtml(label, loaded, total) + cardsHtml;
           },
         });
         successCount += 1;
@@ -417,6 +456,7 @@ if (uploadForm) {
     }
     if (successCount > 0) {
       uploadForm.classList.add('hidden');
+      result?.scrollIntoView?.({ block: 'nearest' });
     }
     if (submitButton) {
       submitButton.disabled = false;
